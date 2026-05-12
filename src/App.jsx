@@ -31,8 +31,8 @@ const SAMPLES = [
 const REC_OPTIONS = [5, 10, 15, 30]
 const DEFAULT_TRANSFORM = { x: 0.5, y: 0.5, scale: 1, rotation: 0, opacity: 1 }
 const DEFAULT_FOLLOW = { momentum: 0.18, intensityX: 1.0, intensityY: 1.0 }
+const DEFAULT_MASK = { on: false, radius: 0.3, softness: 0.3, feather: 0.15, invert: false }
 
-// ============ Helpers ============
 const generateImageThumb = (img, size = 46) => {
   const c = document.createElement('canvas')
   c.width = size; c.height = size
@@ -98,6 +98,29 @@ function ShapeThumb({ shape }){
   )
 }
 
+function EffectThumb({ layer }){
+  const fx = EFFECTS[layer.effectId]
+  const initial = fx ? fx.label.charAt(0) : '?'
+  return (
+    <span className="thumb effect-thumb">
+      <span className="effect-thumb-letter">{initial}</span>
+      {layer.mask?.on && <span className="effect-thumb-mask">⊙</span>}
+    </span>
+  )
+}
+
+const layerLabel = (l) => {
+  if(l.type === 'effect') return EFFECTS[l.effectId]?.label || l.effectId
+  return l.name
+}
+const typeBadge = (l) => {
+  if(l.type === 'image') return 'IMG'
+  if(l.type === 'shape') return 'SHP'
+  if(l.type === 'text')  return 'TXT'
+  if(l.type === 'effect') return 'FX'
+  return '?'
+}
+
 // ============ App ============
 export default function App(){
   const canvasRef = useRef(null)
@@ -111,26 +134,20 @@ export default function App(){
   const [penColor, setPenColor] = useState([0.05, 0.05, 0.05])
   const [textDraft, setTextDraft] = useState(null)
 
-  const [editorState, _setEditorRaw] = useState({ elements: [], stack: [] })
-  const elements = editorState.elements
-  const stack = editorState.stack
-
-  const [selectedElement, setSelectedElement] = useState(null)
-  const [selectedEffect, setSelectedEffect] = useState(null)
+  // Single unified layer stack — bottom to top
+  const [layers, _setLayersRaw] = useState([])
+  const [selectedUid, setSelectedUid] = useState(null)
   const [drawing, setDrawing] = useState({ active: false, points: [] })
   const [collapsedCats, setCollapsedCats] = useState(() => new Set(GROUPS))
 
-  // Record state
   const [recDuration, setRecDuration] = useState(5)
   const [recording, setRecording] = useState(false)
   const [recCountdown, setRecCountdown] = useState(0)
   const recorderRef = useRef(null)
 
-  const stateRef = useRef({ elements, stack })
-  stateRef.current = { elements, stack }
+  const stateRef = useRef(layers); stateRef.current = layers
   const bgRef = useRef(bg); bgRef.current = bg
   const mouseTargetRef = useRef({ x: 0.5, y: 0.5 })
-  // Per-layer smoothed mouse positions: Map uid -> { x, y }
   const followStateRef = useRef(new Map())
 
   // ============ History ============
@@ -148,8 +165,8 @@ export default function App(){
       setHistoryTick(t => t + 1)
     }
   }
-  const setEditor = (updater, opts = {}) => {
-    _setEditorRaw(prev => {
+  const setLayers = (updater, opts = {}) => {
+    _setLayersRaw(prev => {
       const next = typeof updater === 'function' ? updater(prev) : updater
       if(opts.skipHistory) return next
       if(pendingRef.current === null) pendingRef.current = prev
@@ -161,7 +178,7 @@ export default function App(){
   const undo = () => {
     flushPending()
     if(historyRef.current.past.length === 0) return
-    _setEditorRaw(prev => {
+    _setLayersRaw(prev => {
       const restore = historyRef.current.past.pop()
       historyRef.current.future.unshift(prev)
       setHistoryTick(t => t + 1)
@@ -171,7 +188,7 @@ export default function App(){
   const redo = () => {
     flushPending()
     if(historyRef.current.future.length === 0) return
-    _setEditorRaw(prev => {
+    _setLayersRaw(prev => {
       const next = historyRef.current.future.shift()
       historyRef.current.past.push(prev)
       setHistoryTick(t => t + 1)
@@ -188,9 +205,9 @@ export default function App(){
       engineRef.current = eng
       for(const id of Object.keys(EFFECTS)){
         try { eng.registerEffect(id, EFFECTS[id].fs) }
-        catch(shaderErr){ console.error(`[press] effect "${id}":`, shaderErr); throw new Error(`effect "${id}": ${shaderErr.message || shaderErr}`) }
+        catch(shaderErr){ console.error(`[wanna] effect "${id}":`, shaderErr); throw new Error(`effect "${id}": ${shaderErr.message || shaderErr}`) }
       }
-    } catch (e){ console.error('[press] engine bootstrap failed:', e); setErr(e.message || String(e)); return }
+    } catch (e){ console.error('[wanna] engine bootstrap failed:', e); setErr(e.message || String(e)); return }
 
     const resize = () => {
       const rect = canvas.getBoundingClientRect()
@@ -204,10 +221,8 @@ export default function App(){
     let raf
     const tick = (tMs) => {
       const time = tMs * 0.001
-      const st = stateRef.current
-
-      // Update per-layer smoothed positions for any follow-enabled layer
       const target = mouseTargetRef.current
+
       const updateSmooth = (uid, fSet) => {
         let s = followStateRef.current.get(uid)
         if(!s){ s = { x: 0.5, y: 0.5 }; followStateRef.current.set(uid, s) }
@@ -215,42 +230,37 @@ export default function App(){
         s.y += (target.y - s.y) * fSet.momentum * fSet.intensityY
         return s
       }
-
-      // GLOBAL smoothed mouse (used for shaders without per-layer state) — use default
       let gs = followStateRef.current.get('__global__')
       if(!gs){ gs = { x: 0.5, y: 0.5 }; followStateRef.current.set('__global__', gs) }
       gs.x += (target.x - gs.x) * DEFAULT_FOLLOW.momentum
       gs.y += (target.y - gs.y) * DEFAULT_FOLLOW.momentum
 
-      // Apply follow to elements
-      const elementsForRender = st.elements.map(el => {
-        if(!el._follow) return el
-        const f = el._followCfg || DEFAULT_FOLLOW
-        const s = updateSmooth(el.uid, f)
-        const cx = s.x, cy = 1 - s.y
-        if(el.type === 'shape'){
-          const [scX, scY] = shapeCentroid(el.points)
-          return { ...el, x: cx - scX, y: cy - scY }
+      // Build layers-for-render with follow applied
+      const layersForRender = stateRef.current.map(l => {
+        if(!l._follow) return l
+        const f = l._followCfg || DEFAULT_FOLLOW
+        const s = updateSmooth(l.uid, f)
+        if(l.type === 'effect'){
+          const fx = EFFECTS[l.effectId]
+          if(!fx?.followCursor) return l
+          const v = { ...l.values }
+          if(fx.followCursor[0]) v[fx.followCursor[0]] = s.x
+          if(fx.followCursor[1]) v[fx.followCursor[1]] = 1 - s.y
+          return { ...l, values: v }
         }
-        return { ...el, transform: { ...el.transform, x: cx, y: cy } }
+        const cx = s.x, cy = 1 - s.y
+        if(l.type === 'shape'){
+          const [scX, scY] = shapeCentroid(l.points)
+          return { ...l, x: cx - scX, y: cy - scY }
+        }
+        return { ...l, transform: { ...l.transform, x: cx, y: cy } }
       })
-      // Apply follow to effects
-      const effectsForRender = st.stack.map(layer => {
-        const fx = EFFECTS[layer.id]
-        if(!layer._follow || !fx.followCursor) return layer
-        const f = layer._followCfg || DEFAULT_FOLLOW
-        const s = updateSmooth(layer.uid, f)
-        const v = { ...layer.values }
-        if(fx.followCursor[0]) v[fx.followCursor[0]] = s.x
-        if(fx.followCursor[1]) v[fx.followCursor[1]] = 1 - s.y
-        return { ...layer, values: v }
-      })
+
       eng.render({
-        elements: elementsForRender,
-        effects: effectsForRender,
+        layers: layersForRender,
         time,
         bg: bgRef.current,
-        mouse: gs  // global smoothed for cursor-based effects without per-layer follow
+        mouse: gs
       })
       raf = requestAnimationFrame(tick)
     }
@@ -277,8 +287,8 @@ export default function App(){
     img.onload = () => {
       const tex = engineRef.current.uploadTexture(img)
       const thumbnail = generateImageThumb(img)
-      setEditor((s) => {
-        const idx = s.elements.length
+      setLayers((s) => {
+        const idx = s.length
         const t = { ...DEFAULT_TRANSFORM,
           x: idx === 0 ? 0.5 : 0.3 + (idx % 3) * 0.2,
           y: idx === 0 ? 0.5 : 0.3 + Math.floor(idx / 3) * 0.2,
@@ -288,23 +298,21 @@ export default function App(){
           uid: crypto.randomUUID(), type: 'image',
           name: name || ('image-' + (idx + 1)),
           tex, imgW: img.naturalWidth, imgH: img.naturalHeight,
-          thumbnail,
-          visible: true, _follow: false, transform: t
+          thumbnail, visible: true, _follow: false, transform: t
         }
-        setSelectedElement(layer.uid)
-        return { ...s, elements: [...s.elements, layer] }
+        setSelectedUid(layer.uid)
+        return [...s, layer]
       })
     }
     img.onerror = () => console.warn('image load failed', src)
     img.src = src
   }, [])
-
   const addImageBitmap = (bitmap, name) => {
     if(!engineRef.current) return
     const tex = engineRef.current.uploadTexture(bitmap)
     const thumbnail = generateImageThumb(bitmap)
-    setEditor((s) => {
-      const idx = s.elements.length
+    setLayers((s) => {
+      const idx = s.length
       const t = { ...DEFAULT_TRANSFORM,
         x: idx === 0 ? 0.5 : 0.3 + (idx % 3) * 0.2,
         y: idx === 0 ? 0.5 : 0.3 + Math.floor(idx / 3) * 0.2,
@@ -314,14 +322,12 @@ export default function App(){
         uid: crypto.randomUUID(), type: 'image',
         name: name || ('image-' + (idx + 1)),
         tex, imgW: bitmap.width, imgH: bitmap.height,
-        thumbnail,
-        visible: true, _follow: false, transform: t
+        thumbnail, visible: true, _follow: false, transform: t
       }
-      setSelectedElement(layer.uid)
-      return { ...s, elements: [...s.elements, layer] }
+      setSelectedUid(layer.uid)
+      return [...s, layer]
     })
   }
-
   const onUpload = async (files) => {
     if(!files) return
     for(const file of files){
@@ -354,18 +360,18 @@ export default function App(){
       if(!source) return
     }
     const tex = engineRef.current.uploadTexture(source)
-    setEditor((s) => ({ ...s, elements: s.elements.map(l => l.uid === shapeUid ? {
+    setLayers((s) => s.map(l => l.uid === shapeUid ? {
       ...l, imageTex: tex, imgThumbnail: thumb, imgW: w, imgH: h,
       imageFit: l.imageFit || 'cover', tileScale: l.tileScale || 3
-    } : l) }))
+    } : l))
   }, [])
   const clearShapeImage = (shapeUid) => {
-    setEditor((s) => ({ ...s, elements: s.elements.map(l => {
+    setLayers((s) => s.map(l => {
       if(l.uid !== shapeUid) return l
       if(l.imageTex && engineRef.current) engineRef.current.deleteTexture(l.imageTex)
       const { imageTex, imgThumbnail, ...rest } = l
       return rest
-    })}))
+    }))
   }
 
   useEffect(() => {
@@ -386,196 +392,189 @@ export default function App(){
     addImage('/p1.jpg', 'Boucher · Toilette of Venus')
   }, [addImage])
 
-  // ============ Element ops ============
-  const removeElement = (uid) => {
-    setEditor((s) => {
-      const el = s.elements.find(x => x.uid === uid)
-      if(el && el.tex && engineRef.current) engineRef.current.deleteTexture(el.tex)
-      if(el && el.imageTex && engineRef.current) engineRef.current.deleteTexture(el.imageTex)
-      return { ...s, elements: s.elements.filter(x => x.uid !== uid) }
+  // ============ Layer ops ============
+  const removeLayer = (uid) => {
+    setLayers((s) => {
+      const l = s.find(x => x.uid === uid)
+      if(l && l.tex && engineRef.current) engineRef.current.deleteTexture(l.tex)
+      if(l && l.imageTex && engineRef.current) engineRef.current.deleteTexture(l.imageTex)
+      return s.filter(x => x.uid !== uid)
     })
-    if(selectedElement === uid) setSelectedElement(null)
+    if(selectedUid === uid) setSelectedUid(null)
     followStateRef.current.delete(uid)
   }
-  const duplicateElement = (uid) => {
-    setEditor((s) => {
-      const i = s.elements.findIndex(x => x.uid === uid)
+  const duplicateLayer = (uid) => {
+    setLayers((s) => {
+      const i = s.findIndex(x => x.uid === uid)
       if(i < 0) return s
-      const src = s.elements[i]
+      const src = s[i]
       let dup
       if(src.type === 'shape'){
         dup = { ...src, uid: crypto.randomUUID(), points: [...src.points],
           x: (src.x || 0) + 0.05, y: (src.y || 0) + 0.05 }
+      } else if(src.type === 'effect'){
+        dup = { ...src, uid: crypto.randomUUID(), values: { ...src.values },
+          mask: src.mask ? { ...src.mask } : { ...DEFAULT_MASK } }
       } else {
         dup = { ...src, uid: crypto.randomUUID(),
           transform: { ...src.transform, x: src.transform.x + 0.05, y: src.transform.y + 0.05 } }
       }
-      setSelectedElement(dup.uid)
-      return { ...s, elements: [...s.elements.slice(0, i + 1), dup, ...s.elements.slice(i + 1)] }
+      setSelectedUid(dup.uid)
+      return [...s.slice(0, i + 1), dup, ...s.slice(i + 1)]
     })
   }
-  const moveElementZ = (uid, dir) => {
-    setEditor((s) => {
-      const i = s.elements.findIndex(x => x.uid === uid)
+  const moveLayerZ = (uid, dir) => {
+    setLayers((s) => {
+      const i = s.findIndex(x => x.uid === uid)
       const j = i + dir
-      if(i < 0 || j < 0 || j >= s.elements.length) return s
-      const next = [...s.elements]
+      if(i < 0 || j < 0 || j >= s.length) return s
+      const next = [...s]
       ;[next[i], next[j]] = [next[j], next[i]]
-      return { ...s, elements: next }
+      return next
     })
   }
-  const setElementZ = (uid, newIdx) => {
-    setEditor((s) => {
-      const i = s.elements.findIndex(x => x.uid === uid)
+  const setLayerZ = (uid, newIdx) => {
+    setLayers((s) => {
+      const i = s.findIndex(x => x.uid === uid)
       if(i < 0) return s
-      const j = Math.max(0, Math.min(s.elements.length - 1, Math.round(newIdx)))
+      const j = Math.max(0, Math.min(s.length - 1, Math.round(newIdx)))
       if(i === j) return s
-      const next = [...s.elements]
+      const next = [...s]
       const [item] = next.splice(i, 1)
       next.splice(j, 0, item)
-      return { ...s, elements: next }
+      return next
     })
   }
-  const toggleElementVisible = (uid) => {
-    setEditor((s) => ({ ...s, elements: s.elements.map(l => l.uid === uid ? { ...l, visible: !l.visible } : l) }))
+  const toggleLayerVisible = (uid) => {
+    setLayers((s) => s.map(l => l.uid === uid ? { ...l, visible: !l.visible } : l))
   }
-  const toggleElementFollow = (uid) => {
-    setEditor((s) => ({ ...s, elements: s.elements.map(l => l.uid === uid ? {
+  const toggleLayerFollow = (uid) => {
+    setLayers((s) => s.map(l => l.uid === uid ? {
       ...l, _follow: !l._follow, _followCfg: l._followCfg || { ...DEFAULT_FOLLOW }
-    } : l) }))
+    } : l))
   }
-  const updateElementFollowCfg = (uid, key, value) => {
-    setEditor((s) => ({ ...s, elements: s.elements.map(l => l.uid === uid ? {
+  const updateLayerFollowCfg = (uid, key, value) => {
+    setLayers((s) => s.map(l => l.uid === uid ? {
       ...l, _followCfg: { ...(l._followCfg || DEFAULT_FOLLOW), [key]: value }
-    } : l) }))
+    } : l))
   }
   const updateImageTransform = (uid, key, value) => {
-    setEditor((s) => ({ ...s, elements: s.elements.map(l => l.uid === uid && (l.type === 'image' || l.type === 'text') ? {
+    setLayers((s) => s.map(l => l.uid === uid && (l.type === 'image' || l.type === 'text') ? {
       ...l, transform: { ...l.transform, [key]: value }
-    } : l) }))
+    } : l))
   }
   const updateShapeField = (uid, key, value) => {
-    setEditor((s) => ({ ...s, elements: s.elements.map(l => l.uid === uid && l.type === 'shape' ? { ...l, [key]: value } : l) }))
+    setLayers((s) => s.map(l => l.uid === uid && l.type === 'shape' ? { ...l, [key]: value } : l))
   }
   const updateShapeVertex = (uid, idx, x, y) => {
-    setEditor((s) => ({ ...s, elements: s.elements.map(l => {
+    setLayers((s) => s.map(l => {
       if(l.uid !== uid || l.type !== 'shape') return l
       const points = [...l.points]
       points[idx * 2] = x; points[idx * 2 + 1] = y
       return { ...l, points }
-    })}))
+    }))
   }
   const updateText = (uid, key, value) => {
-    setEditor((s) => {
-      const els = s.elements.map(l => {
-        if(l.uid !== uid || l.type !== 'text') return l
-        const updated = { ...l, [key]: value }
-        const c = renderTextToCanvas(updated.text, updated.font, updated.size, updated.color)
-        if(engineRef.current){
-          if(updated.tex) engineRef.current.deleteTexture(updated.tex)
-          updated.tex = engineRef.current.uploadTexture(c)
-          updated.imgW = c.width; updated.imgH = c.height
-          updated.thumbnail = c.toDataURL('image/png')
-          updated.name = (updated.text || '').slice(0, 24) || 'text'
-        }
-        return updated
-      })
-      return { ...s, elements: els }
-    })
+    setLayers((s) => s.map(l => {
+      if(l.uid !== uid || l.type !== 'text') return l
+      const updated = { ...l, [key]: value }
+      const c = renderTextToCanvas(updated.text, updated.font, updated.size, updated.color)
+      if(engineRef.current){
+        if(updated.tex) engineRef.current.deleteTexture(updated.tex)
+        updated.tex = engineRef.current.uploadTexture(c)
+        updated.imgW = c.width; updated.imgH = c.height
+        updated.thumbnail = c.toDataURL('image/png')
+        updated.name = (updated.text || '').slice(0, 24) || 'text'
+      }
+      return updated
+    }))
   }
-  const centerElement = (uid) => {
-    setEditor((s) => ({ ...s, elements: s.elements.map(l => {
+  const updateEffectValue = (uid, key, value) => {
+    setLayers((s) => s.map(l => l.uid === uid && l.type === 'effect' ? {
+      ...l, values: { ...l.values, [key]: value }
+    } : l))
+  }
+  const resetEffect = (uid) => {
+    setLayers((s) => s.map(l => l.uid === uid && l.type === 'effect' ? {
+      ...l, values: defaultValues(l.effectId)
+    } : l))
+  }
+  const updateMask = (uid, key, value) => {
+    setLayers((s) => s.map(l => l.uid === uid && l.type === 'effect' ? {
+      ...l, mask: { ...(l.mask || DEFAULT_MASK), [key]: value }
+    } : l))
+  }
+  const toggleMask = (uid) => {
+    setLayers((s) => s.map(l => l.uid === uid && l.type === 'effect' ? {
+      ...l, mask: { ...(l.mask || DEFAULT_MASK), on: !(l.mask?.on) }
+    } : l))
+  }
+  const centerLayer = (uid) => {
+    setLayers((s) => s.map(l => {
       if(l.uid !== uid) return l
       if(l.type === 'shape'){
         const [scX, scY] = shapeCentroid(l.points)
         return { ...l, x: 0.5 - scX, y: 0.5 - scY }
       }
-      return { ...l, transform: { ...l.transform, x: 0.5, y: 0.5 } }
-    })}))
+      if(l.type === 'image' || l.type === 'text'){
+        return { ...l, transform: { ...l.transform, x: 0.5, y: 0.5 } }
+      }
+      return l
+    }))
   }
-  const resetElement = (uid) => {
-    setEditor((s) => ({ ...s, elements: s.elements.map(l => {
+  const resetLayer = (uid) => {
+    setLayers((s) => s.map(l => {
       if(l.uid !== uid) return l
       if(l.type === 'shape') return { ...l, x: 0, y: 0, opacity: 1, scale: 1, rotation: 0, cornerRadius: 0 }
-      return { ...l, transform: { ...DEFAULT_TRANSFORM } }
-    })}))
+      if(l.type === 'image' || l.type === 'text') return { ...l, transform: { ...DEFAULT_TRANSFORM } }
+      if(l.type === 'effect') return { ...l, values: defaultValues(l.effectId) }
+      return l
+    }))
   }
 
-  // ============ Effect ops ============
-  const addEffect = (id) => {
-    setEditor((s) => {
-      const layer = { uid: crypto.randomUUID(), id, enabled: true, _follow: false, values: defaultValues(id) }
-      setSelectedEffect(layer.uid)
-      return { ...s, stack: [...s.stack, layer] }
+  const addEffect = (effectId) => {
+    setLayers((s) => {
+      const layer = {
+        uid: crypto.randomUUID(), type: 'effect',
+        effectId, visible: true, _follow: false,
+        values: defaultValues(effectId),
+        mask: { ...DEFAULT_MASK }
+      }
+      setSelectedUid(layer.uid)
+      return [...s, layer]
     })
   }
-  const removeEffect = (uid) => {
-    setEditor((s) => ({ ...s, stack: s.stack.filter(l => l.uid !== uid) }))
-    if(selectedEffect === uid) setSelectedEffect(null)
-    followStateRef.current.delete(uid)
+  const clearAllLayers = () => { setLayers([]); setSelectedUid(null) }
+  const clearAllEffects = () => {
+    setLayers((s) => s.filter(l => l.type !== 'effect'))
+    if(selectedUid){
+      const sel = layers.find(l => l.uid === selectedUid)
+      if(sel?.type === 'effect') setSelectedUid(null)
+    }
   }
-  const duplicateEffect = (uid) => {
-    setEditor((s) => {
-      const i = s.stack.findIndex(l => l.uid === uid)
-      if(i < 0) return s
-      const src = s.stack[i]
-      const dup = { ...src, uid: crypto.randomUUID(), values: { ...src.values } }
-      setSelectedEffect(dup.uid)
-      return { ...s, stack: [...s.stack.slice(0, i + 1), dup, ...s.stack.slice(i + 1)] }
-    })
-  }
-  const resetEffect = (uid) => {
-    setEditor((s) => ({ ...s, stack: s.stack.map(l => l.uid === uid ? { ...l, values: defaultValues(l.id) } : l) }))
-  }
-  const moveEffect = (uid, dir) => {
-    setEditor((s) => {
-      const i = s.stack.findIndex(l => l.uid === uid)
-      const j = i + dir
-      if(i < 0 || j < 0 || j >= s.stack.length) return s
-      const next = [...s.stack]
-      ;[next[i], next[j]] = [next[j], next[i]]
-      return { ...s, stack: next }
-    })
-  }
-  const toggleEffect = (uid) => {
-    setEditor((s) => ({ ...s, stack: s.stack.map(l => l.uid === uid ? { ...l, enabled: !l.enabled } : l) }))
-  }
-  const toggleEffectFollow = (uid) => {
-    setEditor((s) => ({ ...s, stack: s.stack.map(l => l.uid === uid ? {
-      ...l, _follow: !l._follow, _followCfg: l._followCfg || { ...DEFAULT_FOLLOW }
-    } : l) }))
-  }
-  const updateEffectFollowCfg = (uid, key, value) => {
-    setEditor((s) => ({ ...s, stack: s.stack.map(l => l.uid === uid ? {
-      ...l, _followCfg: { ...(l._followCfg || DEFAULT_FOLLOW), [key]: value }
-    } : l) }))
-  }
-  const updateEffectValue = (key, value) => {
-    setEditor((s) => ({ ...s, stack: s.stack.map(l => l.uid === selectedEffect ? { ...l, values: { ...l.values, [key]: value } } : l) }))
-  }
-  const clearEffects = () => { setEditor((s) => ({ ...s, stack: [] })); setSelectedEffect(null) }
-
-  const randomize = () => {
+  const scrambleEffects = () => {
     const ids = Object.keys(EFFECTS)
     const n = 2 + Math.floor(Math.random() * 3)
-    const next = []
-    for(let i = 0; i < n; i++){
-      const id = ids[Math.floor(Math.random() * ids.length)]
-      const vals = defaultValues(id)
-      for(const p of EFFECTS[id].params){
-        if(p.type === 'range') vals[p.key] = p.min + Math.random() * (p.max - p.min)
-        else if(p.type === 'toggle') vals[p.key] = Math.random() < 0.4
+    setLayers((s) => {
+      const nonEffects = s.filter(l => l.type !== 'effect')
+      const next = [...nonEffects]
+      for(let i = 0; i < n; i++){
+        const id = ids[Math.floor(Math.random() * ids.length)]
+        const vals = defaultValues(id)
+        for(const p of EFFECTS[id].params){
+          if(p.type === 'range') vals[p.key] = p.min + Math.random() * (p.max - p.min)
+          else if(p.type === 'toggle') vals[p.key] = Math.random() < 0.4
+        }
+        next.push({ uid: crypto.randomUUID(), type: 'effect', effectId: id, visible: true, _follow: false, values: vals, mask: { ...DEFAULT_MASK } })
       }
-      next.push({ uid: crypto.randomUUID(), id, enabled: true, _follow: false, values: vals })
-    }
-    setEditor((s) => ({ ...s, stack: next }))
-    setSelectedEffect(next[next.length - 1].uid)
+      return next
+    })
   }
 
-  // ============ Pen tool ============
+  // ============ Pen / Text ============
   const closeShape = () => {
     if(drawing.points.length < 6) { setDrawing({ active: false, points: [] }); return }
-    setEditor((s) => {
+    setLayers((s) => {
       const shape = {
         uid: crypto.randomUUID(), type: 'shape',
         name: `shape · ${drawing.points.length / 2} pt`,
@@ -584,21 +583,20 @@ export default function App(){
         fill: [...penColor], opacity: 1,
         x: 0, y: 0, scale: 1, rotation: 0, cornerRadius: 0
       }
-      setSelectedElement(shape.uid)
-      return { ...s, elements: [...s.elements, shape] }
+      setSelectedUid(shape.uid)
+      return [...s, shape]
     })
     setDrawing({ active: false, points: [] })
     setTool('select')
   }
   const cancelDrawing = () => setDrawing({ active: false, points: [] })
 
-  // ============ Text tool ============
   const commitText = () => {
     if(!textDraft || !textDraft.value.trim()){ setTextDraft(null); return }
     if(!engineRef.current) return
     const canvas = renderTextToCanvas(textDraft.value, 'Inter, system-ui, sans-serif', 96, [0, 0, 0])
     const tex = engineRef.current.uploadTexture(canvas)
-    setEditor((s) => {
+    setLayers((s) => {
       const layer = {
         uid: crypto.randomUUID(), type: 'text',
         name: textDraft.value.slice(0, 24),
@@ -608,14 +606,14 @@ export default function App(){
         visible: true, _follow: false,
         transform: { ...DEFAULT_TRANSFORM, x: textDraft.x, y: textDraft.y, scale: 0.6 }
       }
-      setSelectedElement(layer.uid)
-      return { ...s, elements: [...s.elements, layer] }
+      setSelectedUid(layer.uid)
+      return [...s, layer]
     })
     setTextDraft(null)
     setTool('select')
   }
 
-  // ============ Export ============
+  // ============ Export / Record ============
   const exportPNG = () => {
     canvasRef.current.toBlob((blob) => {
       const url = URL.createObjectURL(blob)
@@ -624,12 +622,10 @@ export default function App(){
       setTimeout(() => URL.revokeObjectURL(url), 1000)
     }, 'image/png')
   }
-
-  // ============ Record video ============
   const startRecord = () => {
     if(recording) return
     const canvas = canvasRef.current
-    if(!canvas || !canvas.captureStream) return alert('MediaRecorder not supported in this browser')
+    if(!canvas || !canvas.captureStream) return alert('MediaRecorder not supported')
     let mimeType = 'video/webm;codecs=vp9'
     if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm;codecs=vp8'
     if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm'
@@ -644,18 +640,14 @@ export default function App(){
       const a = document.createElement('a')
       a.href = url; a.download = `wanna-${Date.now()}.webm`; a.click()
       setTimeout(() => URL.revokeObjectURL(url), 1500)
-      setRecording(false)
-      setRecCountdown(0)
-      recorderRef.current = null
+      setRecording(false); setRecCountdown(0); recorderRef.current = null
     }
     recorder.start(100)
-    setRecording(true)
-    setRecCountdown(recDuration)
+    setRecording(true); setRecCountdown(recDuration)
     const start = performance.now()
     const tickRec = () => {
       const elapsed = (performance.now() - start) / 1000
-      const remaining = Math.max(0, Math.ceil(recDuration - elapsed))
-      setRecCountdown(remaining)
+      setRecCountdown(Math.max(0, Math.ceil(recDuration - elapsed)))
       if(elapsed < recDuration && recorderRef.current && recorderRef.current.state === 'recording') requestAnimationFrame(tickRec)
       else { try { recorder.stop() } catch(e){} }
     }
@@ -676,7 +668,6 @@ export default function App(){
     mouseTargetRef.current = { x: px, y: 1 - py }
     return { px, py, rect }
   }
-
   const getTransformedPoints = (l) => {
     return transformShapePoints(l.points, {
       x: l.x || 0, y: l.y || 0,
@@ -688,8 +679,8 @@ export default function App(){
   const VERTEX_HIT_PX = 10
   const hitTest = (px, py, W, H) => {
     const cMin = Math.min(W, H)
-    if(selectedElement){
-      const sel = elements.find(e => e.uid === selectedElement)
+    if(selectedUid){
+      const sel = layers.find(e => e.uid === selectedUid)
       if(sel && sel.type === 'shape'){
         const tp = getTransformedPoints(sel)
         for(let i = 0; i < tp.length; i += 2){
@@ -700,9 +691,9 @@ export default function App(){
         }
       }
     }
-    for(let i = elements.length - 1; i >= 0; i--){
-      const l = elements[i]
-      if(!l.visible) continue
+    for(let i = layers.length - 1; i >= 0; i--){
+      const l = layers[i]
+      if(!l.visible || l.type === 'effect') continue
       if(l.type === 'shape'){
         const tp = getTransformedPoints(l)
         let inside = false
@@ -744,14 +735,14 @@ export default function App(){
       return
     }
     const hit = hitTest(px, py, rect.width, rect.height)
-    if(!hit){ setSelectedElement(null); return }
+    if(!hit){ setSelectedUid(null); return }
     if(hit.type === 'vertex'){
       dragRef.current = { kind: 'vertex', uid: hit.shape.uid, vertexIdx: hit.vertexIdx }
       e.currentTarget.setPointerCapture?.(e.pointerId)
       return
     }
     const el = hit.el
-    setSelectedElement(el.uid)
+    setSelectedUid(el.uid)
     if(el.type === 'shape'){
       dragRef.current = { uid: el.uid, kind: 'shape', startPx: px, startPy: py, startX: el.x || 0, startY: el.y || 0 }
     } else {
@@ -764,7 +755,7 @@ export default function App(){
     const d = dragRef.current
     if(!d) return
     if(d.kind === 'vertex'){
-      const sh = elements.find(x => x.uid === d.uid)
+      const sh = layers.find(x => x.uid === d.uid)
       if(!sh) return
       const sc = sh.scale == null ? 1 : sh.scale
       const ox = sh.x || 0, oy = sh.y || 0
@@ -778,11 +769,11 @@ export default function App(){
       updateShapeVertex(d.uid, d.vertexIdx, ix, iy)
       return
     }
-    setEditor((s) => ({ ...s, elements: s.elements.map(l => {
+    setLayers((s) => s.map(l => {
       if(l.uid !== d.uid) return l
       if(d.kind === 'shape') return { ...l, x: d.startX + (px - d.startPx), y: d.startY + (py - d.startPy) }
       return { ...l, transform: { ...d.startT, x: d.startT.x + (px - d.startPx), y: d.startT.y + (py - d.startPy) } }
-    })}))
+    }))
   }
   const onCanvasPointerUp = (e) => {
     dragRef.current = null
@@ -795,7 +786,6 @@ export default function App(){
     if(tool === 'pen' && drawing.active){ e.preventDefault(); closeShape() }
   }
 
-  // Keyboard
   useEffect(() => {
     const handler = (e) => {
       const target = e.target
@@ -812,8 +802,7 @@ export default function App(){
         }
         if(e.key === 'Enter' && tool === 'pen' && drawing.active){ e.preventDefault(); closeShape(); return }
         if(e.key === 'Delete' || e.key === 'Backspace'){
-          if(selectedElement){ e.preventDefault(); removeElement(selectedElement); return }
-          if(selectedEffect){ e.preventDefault(); removeEffect(selectedEffect); return }
+          if(selectedUid){ e.preventDefault(); removeLayer(selectedUid); return }
         }
         if(e.key.toLowerCase() === 'v'){ setTool('select'); return }
         if(e.key.toLowerCase() === 'p'){ setTool('pen'); return }
@@ -823,13 +812,12 @@ export default function App(){
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedElement, selectedEffect, drawing.active, tool, textDraft])
+  }, [selectedUid, drawing.active, tool, textDraft])
 
-  // Selection overlay
   const selectionBox = useMemo(() => {
-    if(!selectedElement) return null
-    const l = elements.find(x => x.uid === selectedElement)
-    if(!l) return null
+    if(!selectedUid) return null
+    const l = layers.find(x => x.uid === selectedUid)
+    if(!l || l.type === 'effect') return null
     const wrap = canvasRef.current?.parentElement
     if(!wrap) return null
     const rect = wrap.getBoundingClientRect()
@@ -858,7 +846,7 @@ export default function App(){
     const ps = (t.scale * cMin) / imgMax
     return { kind: 'image', left: t.x * W, top: t.y * H,
       width: l.imgW * ps, height: l.imgH * ps, rotation: t.rotation || 0 }
-  }, [selectedElement, elements, resizeTick, aspect])
+  }, [selectedUid, layers, resizeTick, aspect])
 
   const grouped = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -872,10 +860,10 @@ export default function App(){
     return g
   }, [search])
 
-  const selectedFxLayer = stack.find(l => l.uid === selectedEffect)
-  const selectedFx = selectedFxLayer ? EFFECTS[selectedFxLayer.id] : null
-  const activePass = stack.filter(l => l.enabled).length
-  const selEl = elements.find(l => l.uid === selectedElement)
+  const sel = layers.find(l => l.uid === selectedUid)
+  const selEffect = sel?.type === 'effect' ? EFFECTS[sel.effectId] : null
+  const activeEffects = layers.filter(l => l.type === 'effect' && l.visible).length
+  const totalElements = layers.filter(l => l.type !== 'effect').length
 
   const aspectInfo = ASPECTS.find(x => x.id === aspect)
   const aspectStyle = useMemo(() => ({
@@ -900,12 +888,12 @@ export default function App(){
   const expandAll = () => setCollapsedCats(new Set())
   const collapseAll = () => setCollapsedCats(new Set(GROUPS))
 
-  const ElementThumb = ({ el }) => {
-    if(el.type === 'shape') return <ShapeThumb shape={el} />
-    if(el.thumbnail) return <img className="thumb" src={el.thumbnail} alt="" />
+  const LayerThumb = ({ layer }) => {
+    if(layer.type === 'shape') return <ShapeThumb shape={layer} />
+    if(layer.type === 'effect') return <EffectThumb layer={layer} />
+    if(layer.thumbnail) return <img className="thumb" src={layer.thumbnail} alt="" />
     return <span className="thumb empty" />
   }
-  const labelForType = (t) => t === 'image' ? 'IMG' : t === 'shape' ? 'SHP' : t === 'text' ? 'TXT' : '?'
 
   const shapeImgInputRef = useRef(null)
   const triggerAssignImage = (uid) => {
@@ -919,17 +907,16 @@ export default function App(){
     e.target.value = ''
   }
 
-  // Renders the per-layer follow controls (when _follow is true)
-  const FollowControls = ({ uid, cfg, updateCfg }) => {
+  const FollowControls = ({ uid, cfg }) => {
     const c = cfg || DEFAULT_FOLLOW
     return (
       <div className="follow-controls">
         <ParamControl param={{ key:'momentum', label:'follow momentum', type:'range', min:0.02, max:0.5, step:0.001, default:0.18 }}
-          value={c.momentum} onChange={(v) => updateCfg(uid, 'momentum', v)} />
+          value={c.momentum} onChange={(v) => updateLayerFollowCfg(uid, 'momentum', v)} />
         <ParamControl param={{ key:'intensityX', label:'follow intensity x', type:'range', min:0, max:1, step:0.01, default:1 }}
-          value={c.intensityX} onChange={(v) => updateCfg(uid, 'intensityX', v)} />
+          value={c.intensityX} onChange={(v) => updateLayerFollowCfg(uid, 'intensityX', v)} />
         <ParamControl param={{ key:'intensityY', label:'follow intensity y', type:'range', min:0, max:1, step:0.01, default:1 }}
-          value={c.intensityY} onChange={(v) => updateCfg(uid, 'intensityY', v)} />
+          value={c.intensityY} onChange={(v) => updateLayerFollowCfg(uid, 'intensityY', v)} />
       </div>
     )
   }
@@ -943,9 +930,11 @@ export default function App(){
       <div className="topbar">
         <div className="brand">
           <span className="brand-mark" aria-label="Wanna">
-            <span className="dot"></span>
-            <span className="dot"></span>
-            <span className="dot"></span>
+            <svg className="brand-svg" viewBox="0 0 28 28" width="22" height="22">
+              <circle cx="14" cy="8" r="3" fill="currentColor"/>
+              <circle cx="8" cy="20" r="3" fill="currentColor"/>
+              <circle cx="20" cy="20" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.6"/>
+            </svg>
           </span>
           <span className="logo">Wanna</span>
           <span className="sub">collage · {Object.keys(EFFECTS).length} shaders</span>
@@ -1034,7 +1023,7 @@ export default function App(){
       {/* CENTER */}
       <div className="center">
         <div className={'canvas-wrap tool-' + tool} style={aspectStyle}>
-          <div className="canvas-tag">{elements.length} el · {activePass} fx{recording ? ` · REC ${recCountdown}s` : ''}</div>
+          <div className="canvas-tag">{layers.length} layers · {activeEffects} fx{recording ? ` · REC ${recCountdown}s` : ''}</div>
           <canvas ref={canvasRef}
             onPointerDown={onCanvasPointerDown}
             onPointerMove={onCanvasPointerMove}
@@ -1109,212 +1098,202 @@ export default function App(){
 
       {/* RIGHT */}
       <div className="right">
-        {/* ELEMENTS */}
         <div className="section-bar">
-          <span className="section-letter">1</span>
-          <span className="section-label">ELEMENTS</span>
-          <span className="section-count">{elements.length}</span>
+          <span className="section-letter">L</span>
+          <span className="section-label">LAYERS</span>
+          <span className="section-count">{layers.length}</span>
+          {layers.length > 0 && (
+            <button className="section-action" onClick={scrambleEffects}>SCRAMBLE FX</button>
+          )}
         </div>
-        <div className="layer-list">
-          {elements.length === 0 && <div className="empty-panel">drop image · sample · pen · text</div>}
-          {elements.map((l, i) => (
-            <div key={l.uid}
-              className={'layer card-layer ' + (l.uid === selectedElement ? 'selected ' : '') + (l.visible ? '' : 'disabled')}
-              onClick={() => setSelectedElement(l.uid)}>
-              <ElementThumb el={l} />
-              <div className="card-meta">
-                <span className="card-line">
-                  <span className="idx">{String(i + 1).padStart(2, '0')}</span>
-                  <span className="type-icon" title={l.type}>{labelForType(l.type)}</span>
-                  {l._follow && <span className="follow-badge" title="follows cursor">⊙</span>}
-                </span>
-                <span className="name">{l.name}</span>
+        <div className="layer-list reverse-list">
+          {layers.length === 0 && <div className="empty-panel">drop image · sample · pen · text · effect</div>}
+          {/* Display in reverse so top-of-list = top-of-canvas */}
+          {[...layers].map((l, displayIdx) => {
+            const i = layers.length - 1 - displayIdx
+            const ll = layers[i]
+            const fx = ll.type === 'effect' ? EFFECTS[ll.effectId] : null
+            const followable = ll.type !== 'effect' || (fx && fx.followCursor)
+            return (
+              <div key={ll.uid}
+                className={'layer card-layer ' + (ll.type === 'effect' ? 'is-effect ' : '') + (ll.uid === selectedUid ? 'selected ' : '') + (ll.visible ? '' : 'disabled')}
+                onClick={() => setSelectedUid(ll.uid)}>
+                <LayerThumb layer={ll} />
+                <div className="card-meta">
+                  <span className="card-line">
+                    <span className="idx">{String(i + 1).padStart(2, '0')}</span>
+                    <span className="type-icon">{typeBadge(ll)}</span>
+                    {ll._follow && <span className="follow-badge" title="follows cursor">⊙</span>}
+                    {ll.type === 'effect' && ll.mask?.on && <span className="mask-badge" title="masked">▣</span>}
+                  </span>
+                  <span className="name">{layerLabel(ll)}</span>
+                </div>
+                <div className="layer-actions" onClick={(e) => e.stopPropagation()}>
+                  {followable && <button className={'follow-btn ' + (ll._follow ? 'on' : '')} title="follow cursor" onClick={() => toggleLayerFollow(ll.uid)}>⊙</button>}
+                  <button title="visible"   onClick={() => toggleLayerVisible(ll.uid)}>{ll.visible ? '●' : '○'}</button>
+                  <button title="duplicate" onClick={() => duplicateLayer(ll.uid)}>+</button>
+                  <button title="up"        onClick={() => moveLayerZ(ll.uid, +1)}>↑</button>
+                  <button title="down"      onClick={() => moveLayerZ(ll.uid, -1)}>↓</button>
+                  <button title="delete"    onClick={() => removeLayer(ll.uid)}>×</button>
+                </div>
               </div>
-              <div className="layer-actions" onClick={(e) => e.stopPropagation()}>
-                <button className={'follow-btn ' + (l._follow ? 'on' : '')} title="follow cursor" onClick={() => toggleElementFollow(l.uid)}>⊙</button>
-                <button title="visible"   onClick={() => toggleElementVisible(l.uid)}>{l.visible ? '●' : '○'}</button>
-                <button title="duplicate" onClick={() => duplicateElement(l.uid)}>+</button>
-                <button title="up"        onClick={() => moveElementZ(l.uid, +1)}>↑</button>
-                <button title="down"      onClick={() => moveElementZ(l.uid, -1)}>↓</button>
-                <button title="delete"    onClick={() => removeElement(l.uid)}>×</button>
-              </div>
+            )
+          })}
+          {layers.length > 0 && (
+            <div className="row-btns" style={{ padding: '8px 12px' }}>
+              <button className="mini-btn" onClick={clearAllEffects}>clear fx</button>
+              <button className="mini-btn" onClick={clearAllLayers}>clear all</button>
             </div>
-          ))}
+          )}
         </div>
 
-        {selEl && (
-          <>
-            <div className="sub-bar">
-              <span>{(selEl.name || 'untitled').slice(0, 22)}</span>
-              <span className="sub-tag">{(selEl.type || '').toUpperCase()}</span>
+        {sel && (
+          <div className={sel.type === 'effect' ? 'params-block' : ''}>
+            <div className={'sub-bar ' + (sel.type === 'effect' ? 'editing' : '')}>
+              {sel.type === 'effect' && <span>EDITING</span>}
+              <span className={sel.type === 'effect' ? 'editing-name' : ''}>{layerLabel(sel)}</span>
+              <span className="sub-tag">{sel.type === 'effect' ? selEffect.group : sel.type.toUpperCase()}</span>
             </div>
             <div className="params">
-              {selEl.type === 'text' && (
+              {sel.type === 'effect' && (
+                <>
+                  <div className="param">
+                    <div className="toggle">
+                      <div className={'switch ' + (sel.mask?.on ? 'on' : '')} onClick={() => toggleMask(sel.uid)} />
+                      <span>▣ mask · cursor circle</span>
+                    </div>
+                  </div>
+                  {sel.mask?.on && (
+                    <div className="follow-controls">
+                      <ParamControl param={{ key:'radius', label:'mask radius', type:'range', min:0.05, max:1.5, step:0.001, default:0.3 }}
+                        value={sel.mask.radius} onChange={(v) => updateMask(sel.uid, 'radius', v)} />
+                      <ParamControl param={{ key:'softness', label:'mask softness', type:'range', min:0, max:1, step:0.01, default:0.3 }}
+                        value={sel.mask.softness} onChange={(v) => updateMask(sel.uid, 'softness', v)} />
+                      <ParamControl param={{ key:'feather', label:'mask feather', type:'range', min:0, max:1, step:0.01, default:0.15 }}
+                        value={sel.mask.feather} onChange={(v) => updateMask(sel.uid, 'feather', v)} />
+                      <div className="param">
+                        <div className="toggle">
+                          <div className={'switch ' + (sel.mask.invert ? 'on' : '')} onClick={() => updateMask(sel.uid, 'invert', !sel.mask.invert)} />
+                          <span>invert mask</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {selEffect.followCursor && (
+                    <div className="param">
+                      <div className="toggle">
+                        <div className={'switch ' + (sel._follow ? 'on' : '')} onClick={() => toggleLayerFollow(sel.uid)} />
+                        <span>⊙ follow cursor</span>
+                      </div>
+                    </div>
+                  )}
+                  {sel._follow && <FollowControls uid={sel.uid} cfg={sel._followCfg} />}
+                  {selEffect.params.map((p) => (
+                    <ParamControl key={p.key} param={p}
+                      value={sel.values[p.key]}
+                      onChange={(v) => updateEffectValue(sel.uid, p.key, v)} />
+                  ))}
+                  <div className="row-btns">
+                    <button className="mini-btn" onClick={() => resetEffect(sel.uid)}>reset values</button>
+                  </div>
+                </>
+              )}
+
+              {sel.type === 'text' && (
                 <div className="param">
                   <div className="param-h"><span>text</span></div>
-                  <input className="text-edit" type="text" value={selEl.text}
-                    onChange={(e) => updateText(selEl.uid, 'text', e.target.value)} />
+                  <input className="text-edit" type="text" value={sel.text}
+                    onChange={(e) => updateText(sel.uid, 'text', e.target.value)} />
                 </div>
               )}
-              {(selEl.type === 'image' || selEl.type === 'text') && (
+              {(sel.type === 'image' || sel.type === 'text') && (
                 <>
                   <ParamControl param={{ key: 'x', label: 'x', type: 'range', min: -0.5, max: 1.5, step: 0.001, default: 0.5 }}
-                    value={selEl.transform.x} onChange={(v) => updateImageTransform(selEl.uid, 'x', v)} />
+                    value={sel.transform.x} onChange={(v) => updateImageTransform(sel.uid, 'x', v)} />
                   <ParamControl param={{ key: 'y', label: 'y', type: 'range', min: -0.5, max: 1.5, step: 0.001, default: 0.5 }}
-                    value={selEl.transform.y} onChange={(v) => updateImageTransform(selEl.uid, 'y', v)} />
+                    value={sel.transform.y} onChange={(v) => updateImageTransform(sel.uid, 'y', v)} />
                   <ParamControl param={{ key: 'scale', label: 'scale', type: 'range', min: 0.05, max: 3, step: 0.001, default: 1 }}
-                    value={selEl.transform.scale} onChange={(v) => updateImageTransform(selEl.uid, 'scale', v)} />
+                    value={sel.transform.scale} onChange={(v) => updateImageTransform(sel.uid, 'scale', v)} />
                   <ParamControl param={{ key: 'rotation', label: 'rotation', type: 'range', min: -Math.PI, max: Math.PI, step: 0.001, default: 0 }}
-                    value={selEl.transform.rotation} onChange={(v) => updateImageTransform(selEl.uid, 'rotation', v)} />
+                    value={sel.transform.rotation} onChange={(v) => updateImageTransform(sel.uid, 'rotation', v)} />
                   <ParamControl param={{ key: 'opacity', label: 'opacity', type: 'range', min: 0, max: 1, step: 0.01, default: 1 }}
-                    value={selEl.transform.opacity} onChange={(v) => updateImageTransform(selEl.uid, 'opacity', v)} />
+                    value={sel.transform.opacity} onChange={(v) => updateImageTransform(sel.uid, 'opacity', v)} />
                 </>
               )}
-              {selEl.type === 'text' && (
+              {sel.type === 'text' && (
                 <>
                   <ParamControl param={{ key: 'size', label: 'font size', type: 'range', min: 16, max: 300, step: 1, default: 96 }}
-                    value={selEl.size} onChange={(v) => updateText(selEl.uid, 'size', v)} />
+                    value={sel.size} onChange={(v) => updateText(sel.uid, 'size', v)} />
                   <ParamControl param={{ key: 'color', label: 'color', type: 'color', default: [0,0,0] }}
-                    value={selEl.color} onChange={(v) => updateText(selEl.uid, 'color', v)} />
+                    value={sel.color} onChange={(v) => updateText(sel.uid, 'color', v)} />
                 </>
               )}
-              {selEl.type === 'shape' && (
+              {sel.type === 'shape' && (
                 <>
                   <ParamControl param={{ key: 'x', label: 'offset x', type: 'range', min: -1, max: 1, step: 0.001, default: 0 }}
-                    value={selEl.x || 0} onChange={(v) => updateShapeField(selEl.uid, 'x', v)} />
+                    value={sel.x || 0} onChange={(v) => updateShapeField(sel.uid, 'x', v)} />
                   <ParamControl param={{ key: 'y', label: 'offset y', type: 'range', min: -1, max: 1, step: 0.001, default: 0 }}
-                    value={selEl.y || 0} onChange={(v) => updateShapeField(selEl.uid, 'y', v)} />
+                    value={sel.y || 0} onChange={(v) => updateShapeField(sel.uid, 'y', v)} />
                   <ParamControl param={{ key: 'scale', label: 'scale', type: 'range', min: 0.1, max: 3, step: 0.001, default: 1 }}
-                    value={selEl.scale == null ? 1 : selEl.scale} onChange={(v) => updateShapeField(selEl.uid, 'scale', v)} />
+                    value={sel.scale == null ? 1 : sel.scale} onChange={(v) => updateShapeField(sel.uid, 'scale', v)} />
                   <ParamControl param={{ key: 'rotation', label: 'rotation', type: 'range', min: -Math.PI, max: Math.PI, step: 0.001, default: 0 }}
-                    value={selEl.rotation || 0} onChange={(v) => updateShapeField(selEl.uid, 'rotation', v)} />
+                    value={sel.rotation || 0} onChange={(v) => updateShapeField(sel.uid, 'rotation', v)} />
                   <ParamControl param={{ key: 'cornerRadius', label: 'border radius', type: 'range', min: 0, max: 0.5, step: 0.001, default: 0 }}
-                    value={selEl.cornerRadius || 0} onChange={(v) => updateShapeField(selEl.uid, 'cornerRadius', v)} />
+                    value={sel.cornerRadius || 0} onChange={(v) => updateShapeField(sel.uid, 'cornerRadius', v)} />
                   <ParamControl param={{ key: 'opacity', label: 'opacity', type: 'range', min: 0, max: 1, step: 0.01, default: 1 }}
-                    value={selEl.opacity == null ? 1 : selEl.opacity}
-                    onChange={(v) => updateShapeField(selEl.uid, 'opacity', v)} />
-                  {!selEl.imageTex && (
+                    value={sel.opacity == null ? 1 : sel.opacity}
+                    onChange={(v) => updateShapeField(sel.uid, 'opacity', v)} />
+                  {!sel.imageTex && (
                     <ParamControl param={{ key: 'fill', label: 'fill color', type: 'color', default: [0,0,0] }}
-                      value={selEl.fill} onChange={(v) => updateShapeField(selEl.uid, 'fill', v)} />
+                      value={sel.fill} onChange={(v) => updateShapeField(sel.uid, 'fill', v)} />
                   )}
                   <div className="row-btns">
-                    {selEl.imageTex
-                      ? <button className="mini-btn" onClick={() => clearShapeImage(selEl.uid)}>remove image</button>
-                      : <button className="mini-btn" onClick={() => triggerAssignImage(selEl.uid)}>assign image</button>
+                    {sel.imageTex
+                      ? <button className="mini-btn" onClick={() => clearShapeImage(sel.uid)}>remove image</button>
+                      : <button className="mini-btn" onClick={() => triggerAssignImage(sel.uid)}>assign image</button>
                     }
                   </div>
-                  {selEl.imageTex && (
+                  {sel.imageTex && (
                     <>
                       <ParamControl param={{ key:'imageFit', label:'image fit', type:'select',
-                        options:[['cover',0],['contain',1],['tile',2]],
-                        default:0
-                      }}
-                        value={({cover:0,contain:1,tile:2})[selEl.imageFit ?? 'cover'] ?? 0}
+                        options:[['cover',0],['contain',1],['tile',2]], default:0 }}
+                        value={({cover:0,contain:1,tile:2})[sel.imageFit ?? 'cover'] ?? 0}
                         onChange={(v) => {
                           const map = ['cover','contain','tile']
-                          updateShapeField(selEl.uid, 'imageFit', map[v] || 'cover')
+                          updateShapeField(sel.uid, 'imageFit', map[v] || 'cover')
                         }} />
-                      {selEl.imageFit === 'tile' && (
+                      {sel.imageFit === 'tile' && (
                         <ParamControl param={{ key:'tileScale', label:'tile scale', type:'range', min:1, max:20, step:0.1, default:3 }}
-                          value={selEl.tileScale || 3}
-                          onChange={(v) => updateShapeField(selEl.uid, 'tileScale', v)} />
+                          value={sel.tileScale || 3}
+                          onChange={(v) => updateShapeField(sel.uid, 'tileScale', v)} />
                       )}
                     </>
                   )}
                 </>
               )}
-              <ParamControl param={{ key: 'z', label: 'z (depth)', type: 'range', min: 1, max: Math.max(elements.length, 1), step: 1, default: 1 }}
-                value={elements.findIndex(e => e.uid === selEl.uid) + 1}
-                onChange={(v) => setElementZ(selEl.uid, v - 1)} />
-              <div className="row-btns">
-                <button className="mini-btn" onClick={() => centerElement(selEl.uid)}>center</button>
-                <button className="mini-btn" onClick={() => resetElement(selEl.uid)}>reset</button>
-                <button className={'mini-btn ' + (selEl._follow ? 'on' : '')} onClick={() => toggleElementFollow(selEl.uid)}>
-                  ⊙ follow cursor
-                </button>
-              </div>
-              {selEl._follow && (
-                <FollowControls uid={selEl.uid} cfg={selEl._followCfg} updateCfg={updateElementFollowCfg} />
-              )}
-            </div>
-          </>
-        )}
-
-        {/* EFFECTS */}
-        <div className="section-bar">
-          <span className="section-letter">2</span>
-          <span className="section-label">EFFECTS</span>
-          <span className="section-count">{stack.length}</span>
-          {stack.length > 0 && (
-            <button className="section-action" onClick={randomize}>SCRAMBLE</button>
-          )}
-        </div>
-        <div className="layer-list">
-          {stack.length === 0 && <div className="empty-panel">click an effect on the left</div>}
-          {stack.map((l, i) => {
-            const fx = EFFECTS[l.id]
-            const followable = !!fx.followCursor
-            return (
-            <div key={l.uid}
-              className={'layer effect-layer ' + (l.uid === selectedEffect ? 'selected ' : '') + (l.enabled ? '' : 'disabled')}
-              onClick={() => setSelectedEffect(l.uid)}>
-              <span className="idx">{String(i + 1).padStart(2, '0')}</span>
-              <span className="name">{fx.label}</span>
-              <div className="layer-actions" onClick={(e) => e.stopPropagation()}>
-                {followable && <button className={'follow-btn ' + (l._follow ? 'on' : '')} title="follow cursor" onClick={() => toggleEffectFollow(l.uid)}>⊙</button>}
-                <button title="toggle"    onClick={() => toggleEffect(l.uid)}>{l.enabled ? '●' : '○'}</button>
-                <button title="duplicate" onClick={() => duplicateEffect(l.uid)}>+</button>
-                <button title="reset"     onClick={() => resetEffect(l.uid)}>↺</button>
-                <button title="up"        onClick={() => moveEffect(l.uid, -1)}>↑</button>
-                <button title="down"      onClick={() => moveEffect(l.uid, +1)}>↓</button>
-                <button title="delete"    onClick={() => removeEffect(l.uid)}>×</button>
-              </div>
-            </div>
-          )})}
-          {stack.length > 0 && (
-            <div className="row-btns" style={{ padding: '8px 12px' }}>
-              <button className="mini-btn" onClick={clearEffects}>clear all</button>
-            </div>
-          )}
-        </div>
-
-        {selectedFxLayer && selectedFx ? (
-          <div className="params-block">
-            <div className="sub-bar editing">
-              <span>EDITING</span>
-              <span className="editing-name">{selectedFx.label}</span>
-              <span className="sub-tag">{selectedFx.group}</span>
-            </div>
-            <div className="params">
-              {selectedFx.followCursor && (
+              {sel.type !== 'effect' && (
                 <>
-                  <div className="param">
-                    <div className="toggle">
-                      <div className={'switch ' + (selectedFxLayer._follow ? 'on' : '')}
-                        onClick={() => toggleEffectFollow(selectedFxLayer.uid)} />
-                      <span>⊙ follow cursor</span>
-                    </div>
+                  <ParamControl param={{ key: 'z', label: 'z (depth)', type: 'range', min: 1, max: Math.max(layers.length, 1), step: 1, default: 1 }}
+                    value={layers.findIndex(e => e.uid === sel.uid) + 1}
+                    onChange={(v) => setLayerZ(sel.uid, v - 1)} />
+                  <div className="row-btns">
+                    <button className="mini-btn" onClick={() => centerLayer(sel.uid)}>center</button>
+                    <button className="mini-btn" onClick={() => resetLayer(sel.uid)}>reset</button>
+                    <button className={'mini-btn ' + (sel._follow ? 'on' : '')} onClick={() => toggleLayerFollow(sel.uid)}>
+                      ⊙ follow cursor
+                    </button>
                   </div>
-                  {selectedFxLayer._follow && (
-                    <FollowControls uid={selectedFxLayer.uid} cfg={selectedFxLayer._followCfg} updateCfg={updateEffectFollowCfg} />
-                  )}
+                  {sel._follow && <FollowControls uid={sel.uid} cfg={sel._followCfg} />}
                 </>
               )}
-              {selectedFx.params.map((p) => (
-                <ParamControl key={p.key} param={p}
-                  value={selectedFxLayer.values[p.key]}
-                  onChange={(v) => updateEffectValue(p.key, v)} />
-              ))}
             </div>
           </div>
-        ) : (
-          stack.length > 0 && <div className="hint">↑ click an effect to edit values</div>
         )}
       </div>
 
       {/* STATUS BAR */}
       <div className="statusbar">
-        <span className="ok">webgl2 · {elements.length} el · {activePass} fx</span>
+        <span className="ok">webgl2 · {totalElements} el · {activeEffects} fx</span>
         <span>{Object.keys(EFFECTS).length} effects</span>
         <span style={{ marginLeft: 'auto', display: 'flex', gap: '12px' }}>
           <span><kbd>V</kbd> select</span>

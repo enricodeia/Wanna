@@ -56,15 +56,9 @@ button{ background: none; border: 0; cursor: pointer; padding: 0; color: inherit
 .brand-mark{
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  color: var(--ink);
 }
-.brand-mark .dot{
-  width: 6px;
-  height: 6px;
-  background: var(--ink);
-  border-radius: 50%;
-  display: inline-block;
-}
+.brand-svg{ display: block; }
 
 .tools{
   display: flex;
@@ -572,6 +566,49 @@ button{ background: none; border: 0; cursor: pointer; padding: 0; color: inherit
 .thumb.empty{
   display: inline-block;
   background: repeating-linear-gradient(45deg, #f0f0f0, #f0f0f0 4px, #fafafa 4px, #fafafa 8px);
+}
+.effect-thumb{
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ink);
+  border-color: var(--ink);
+}
+.effect-thumb-letter{
+  color: var(--paper);
+  font-size: 18px;
+  font-weight: 800;
+  font-family: var(--mono);
+  line-height: 1;
+}
+.effect-thumb-mask{
+  position: absolute;
+  bottom: 1px; right: 2px;
+  font-size: 9px;
+  color: var(--paper);
+  background: rgba(255,255,255,0.18);
+  border-radius: 50%;
+  width: 12px; height: 12px;
+  display: flex; align-items: center; justify-content: center;
+  line-height: 1;
+}
+.layer.is-effect{
+  background: var(--paper-2);
+}
+.layer.is-effect:hover{ background: var(--hover); }
+.layer.is-effect.selected{ background: var(--selected); }
+.mask-badge{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px; height: 14px;
+  font-size: 9px;
+  background: var(--ink);
+  color: var(--paper);
+  border-radius: 2px;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .follow-badge{

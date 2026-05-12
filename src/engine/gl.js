@@ -1,4 +1,5 @@
-// WebGL2 engine: image/text sprites + polygon shapes (solid or textured) + effect pipeline.
+// WebGL2 engine: unified layer stack — sprites/shapes/text and effects rendered
+// in a single bottom-to-top pipeline (Photoshop-style adjustment layers).
 
 const FULLSCREEN_VS = `#version 300 es
 in vec2 a_pos;
@@ -37,8 +38,6 @@ void main(){
   o = vec4(c.rgb, c.a * u_opacity);
 }`
 
-// Shape VS — takes positions + UVs in 0..1 canvas coords (positions already
-// post-transformed CPU-side), outputs NDC and varies UV for textured fills.
 const SHAPE_VS = `#version 300 es
 in vec2 a_pos;
 in vec2 a_uv;
@@ -56,28 +55,24 @@ uniform sampler2D u_tex;
 uniform vec3 u_fill;
 uniform float u_opacity;
 uniform float u_useTexture;
-uniform float u_imgAR;     // image width / height
-uniform float u_shapeAR;   // shape bbox width / height
-uniform float u_fitMode;   // 0=fill, 1=cover, 2=contain, 3=tile
+uniform float u_imgAR;
+uniform float u_shapeAR;
+uniform float u_fitMode;
 uniform float u_tileScale;
 out vec4 o;
 void main(){
-  // Y flip so image is right-side up inside shape (texture was FLIP_Y'd on upload)
   vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
   bool outOfBounds = false;
   if(u_fitMode > 0.5 && u_fitMode < 1.5){
-    // cover: image fills shape, may crop
     float r = u_imgAR / u_shapeAR;
     if(r > 1.0) uv.x = (uv.x - 0.5) / r + 0.5;
     else        uv.y = (uv.y - 0.5) * r + 0.5;
   } else if(u_fitMode > 1.5 && u_fitMode < 2.5){
-    // contain: image fits inside, letterboxed
     float r = u_imgAR / u_shapeAR;
     if(r > 1.0) uv.y = (uv.y - 0.5) * r + 0.5;
     else        uv.x = (uv.x - 0.5) / r + 0.5;
     if(uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) outOfBounds = true;
   } else if(u_fitMode > 2.5){
-    // tile
     uv = fract(uv * max(u_tileScale, 0.001));
   }
   vec3 imageCol = outOfBounds ? u_fill : texture(u_tex, uv).rgb;
@@ -91,6 +86,30 @@ in vec2 v_uv;
 uniform sampler2D u_tex;
 out vec4 o;
 void main(){ o = texture(u_tex, v_uv); }`
+
+// Mask blend: interpolates between original and effected based on a soft circular cursor mask.
+const MASK_BLEND_FS = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_originalTex;
+uniform sampler2D u_effectedTex;
+uniform vec2 u_res;
+uniform vec2 u_mouse;
+uniform float u_maskRadius;
+uniform float u_maskSoftness;
+uniform float u_maskInvert;
+uniform float u_maskFeather;
+out vec4 o;
+void main(){
+  vec4 orig = texture(u_originalTex, v_uv);
+  vec4 effected = texture(u_effectedTex, v_uv);
+  vec2 ar = u_res / max(u_res.x, u_res.y);
+  float d = length((v_uv - u_mouse) * ar);
+  float inner = u_maskRadius * (1.0 - u_maskSoftness);
+  float maskValue = 1.0 - smoothstep(inner, u_maskRadius * (1.0 + u_maskFeather), d);
+  if(u_maskInvert > 0.5) maskValue = 1.0 - maskValue;
+  o = mix(orig, effected, maskValue);
+}`
 
 function compile(gl, type, src){
   const s = gl.createShader(type)
@@ -130,9 +149,6 @@ function makeFBO(gl, w, h){
   return { tex, fbo, w, h }
 }
 
-// =============================================================
-// CPU-side helpers exported for hit-test / overlays in App.jsx
-// =============================================================
 export function shapeCentroid(points){
   const n = points.length / 2
   let cx = 0, cy = 0
@@ -168,7 +184,6 @@ export function roundPolygon(points, radius, segments = 6){
   return out
 }
 
-// Transform polygon: round, then scale + rotate around centroid, then translate by (offX, offY).
 export function transformShapePoints(points, { x = 0, y = 0, scale = 1, rotation = 0, cornerRadius = 0 } = {}){
   const rounded = cornerRadius > 0 ? roundPolygon(points, cornerRadius) : points.slice()
   const [cx, cy] = shapeCentroid(rounded)
@@ -189,7 +204,6 @@ export function createEngine(canvas){
   const gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true, premultipliedAlpha: false, antialias: true })
   if(!gl) throw new Error('WebGL2 unavailable')
 
-  // Fullscreen triangle
   const fsVAO = gl.createVertexArray()
   gl.bindVertexArray(fsVAO)
   const fsBuf = gl.createBuffer()
@@ -197,7 +211,6 @@ export function createEngine(canvas){
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW)
   gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0)
 
-  // Sprite quad
   const spriteVAO = gl.createVertexArray()
   gl.bindVertexArray(spriteVAO)
   const spriteBuf = gl.createBuffer()
@@ -211,7 +224,6 @@ export function createEngine(canvas){
   gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0)
   gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8)
 
-  // Shape VAO (dynamic, positions + UVs)
   const shapeVAO = gl.createVertexArray()
   gl.bindVertexArray(shapeVAO)
   const shapeBuf = gl.createBuffer()
@@ -226,16 +238,19 @@ export function createEngine(canvas){
   const shapeU = uniforms(gl, shapeProg)
   const copyProg = linkProgram(gl, FULLSCREEN_VS, COPY_FS, ['a_pos'])
   const copyU = uniforms(gl, copyProg)
+  const maskProg = linkProgram(gl, FULLSCREEN_VS, MASK_BLEND_FS, ['a_pos'])
+  const maskU = uniforms(gl, maskProg)
 
   const effectPrograms = new Map()
   let W = 0, H = 0
-  let fboA = null, fboB = null
+  let fboA = null, fboB = null, fboC = null
 
   function resize(w, h){
     W = w; H = h; canvas.width = w; canvas.height = h
     if(fboA){ gl.deleteFramebuffer(fboA.fbo); gl.deleteTexture(fboA.tex) }
     if(fboB){ gl.deleteFramebuffer(fboB.fbo); gl.deleteTexture(fboB.tex) }
-    fboA = makeFBO(gl, w, h); fboB = makeFBO(gl, w, h)
+    if(fboC){ gl.deleteFramebuffer(fboC.fbo); gl.deleteTexture(fboC.tex) }
+    fboA = makeFBO(gl, w, h); fboB = makeFBO(gl, w, h); fboC = makeFBO(gl, w, h)
   }
   function uploadTexture(image){
     const tex = gl.createTexture()
@@ -267,6 +282,16 @@ export function createEngine(canvas){
       }
     }
   }
+  function blitFBO(srcTex, dstFBO, w, h){
+    gl.useProgram(copyProg)
+    gl.bindVertexArray(fsVAO)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dstFBO ? dstFBO.fbo : null)
+    gl.viewport(0, 0, w, h)
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, srcTex)
+    gl.uniform1i(copyU.u_tex, 0)
+    gl.drawArrays(gl.TRIANGLES, 0, 3)
+  }
 
   function drawSprite(s){
     const t = s.transform || s
@@ -286,7 +311,6 @@ export function createEngine(canvas){
 
   function drawShape(s){
     if(!s.points || s.points.length < 6) return
-    // Transform points (corner radius + scale + rotation + offset)
     const tp = transformShapePoints(s.points, {
       x: s.x || 0, y: s.y || 0,
       scale: s.scale == null ? 1 : s.scale,
@@ -295,22 +319,15 @@ export function createEngine(canvas){
     })
     const n = tp.length / 2
     if(n < 3) return
-
-    // Bbox for UV computation
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
     for(let i = 0; i < n; i++){
       if(tp[i*2] < minX) minX = tp[i*2]; if(tp[i*2+1] < minY) minY = tp[i*2+1]
       if(tp[i*2] > maxX) maxX = tp[i*2]; if(tp[i*2+1] > maxY) maxY = tp[i*2+1]
     }
     const bw = (maxX - minX) || 1, bh = (maxY - minY) || 1
-
-    // Centroid
     let cx = 0, cy = 0
     for(let i = 0; i < n; i++){ cx += tp[i*2]; cy += tp[i*2+1] }
     cx /= n; cy /= n
-
-    // Build vertex array: centroid + each point + closing point
-    // Each vertex: [x, y, u, v]
     const arr = new Float32Array((n + 2) * 4)
     arr[0] = cx; arr[1] = cy
     arr[2] = (cx - minX) / bw; arr[3] = (cy - minY) / bh
@@ -326,11 +343,9 @@ export function createEngine(canvas){
     arr[o+1] = tp[1]
     arr[o+2] = (tp[0] - minX) / bw
     arr[o+3] = (tp[1] - minY) / bh
-
     gl.bindVertexArray(shapeVAO)
     gl.bindBuffer(gl.ARRAY_BUFFER, shapeBuf)
     gl.bufferData(gl.ARRAY_BUFFER, arr, gl.DYNAMIC_DRAW)
-
     const useTex = s.imageTex ? 1 : 0
     if(useTex){
       gl.activeTexture(gl.TEXTURE0)
@@ -340,7 +355,6 @@ export function createEngine(canvas){
     gl.uniform3f(shapeU.u_fill, s.fill[0], s.fill[1], s.fill[2])
     gl.uniform1f(shapeU.u_opacity, s.opacity == null ? 1 : s.opacity)
     gl.uniform1f(shapeU.u_useTexture, useTex)
-    // Fit mode uniforms
     const fitMap = { fill: 0, cover: 1, contain: 2, tile: 3 }
     const fitMode = fitMap[s.imageFit] != null ? fitMap[s.imageFit] : 0
     const imgAR = (s.imgW && s.imgH) ? (s.imgW / s.imgH) : 1
@@ -352,59 +366,88 @@ export function createEngine(canvas){
     gl.drawArrays(gl.TRIANGLE_FAN, 0, arr.length / 4)
   }
 
-  function render({ elements, effects, time, bg, mouse }){
+  // ============ Unified render pipeline ============
+  // layers: bottom-to-top. Each layer is either a sprite (image/text/shape)
+  // OR an effect. Effects affect the current accumulated framebuffer (everything
+  // rendered before them). Sprites render ON TOP of the current state.
+  function render({ layers, time, bg, mouse }){
     if(!fboA) return
 
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fboA.fbo)
+    // Initialize: clear fboA with bg color
+    let read = fboA, write = fboB
+    gl.bindFramebuffer(gl.FRAMEBUFFER, read.fbo)
     gl.viewport(0, 0, W, H)
     gl.clearColor(bg[0], bg[1], bg[2], 1.0)
     gl.clear(gl.COLOR_BUFFER_BIT)
 
-    gl.enable(gl.BLEND)
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+    for(const layer of layers){
+      if(!layer || !layer.visible) continue
 
-    for(const el of elements){
-      if(!el || !el.visible) continue
-      if((el.type === 'image' || el.type === 'text') && el.tex){
-        gl.useProgram(spriteProg)
-        gl.bindVertexArray(spriteVAO)
-        gl.uniform2f(spriteU.u_canvasSize, W, H)
-        gl.uniform1i(spriteU.u_tex, 0)
-        drawSprite(el)
-      } else if(el.type === 'shape'){
-        gl.useProgram(shapeProg)
-        drawShape(el)
+      if(layer.type === 'effect'){
+        const entry = effectPrograms.get(layer.effectId)
+        if(!entry) continue
+
+        // Optional mask: save current state to fboC
+        const useMask = layer.mask && layer.mask.on
+        if(useMask) blitFBO(read.tex, fboC, W, H)
+
+        // Run the effect: read → write
+        gl.useProgram(entry.prog)
+        gl.bindVertexArray(fsVAO)
+        gl.bindFramebuffer(gl.FRAMEBUFFER, write.fbo)
+        gl.viewport(0, 0, write.w, write.h)
+        gl.activeTexture(gl.TEXTURE0)
+        gl.bindTexture(gl.TEXTURE_2D, read.tex)
+        if(entry.u.u_tex)   gl.uniform1i(entry.u.u_tex, 0)
+        if(entry.u.u_res)   gl.uniform2f(entry.u.u_res, write.w, write.h)
+        if(entry.u.u_mouse && mouse) gl.uniform2f(entry.u.u_mouse, mouse.x, mouse.y)
+        setUniforms(entry.u, { ...layer.values, u_time: time })
+        gl.drawArrays(gl.TRIANGLES, 0, 3)
+        let t = read; read = write; write = t
+
+        // Apply mask blend: orig (fboC) + effected (read) → write
+        if(useMask){
+          gl.useProgram(maskProg)
+          gl.bindVertexArray(fsVAO)
+          gl.bindFramebuffer(gl.FRAMEBUFFER, write.fbo)
+          gl.viewport(0, 0, write.w, write.h)
+          gl.activeTexture(gl.TEXTURE0)
+          gl.bindTexture(gl.TEXTURE_2D, fboC.tex)
+          if(maskU.u_originalTex) gl.uniform1i(maskU.u_originalTex, 0)
+          gl.activeTexture(gl.TEXTURE1)
+          gl.bindTexture(gl.TEXTURE_2D, read.tex)
+          if(maskU.u_effectedTex) gl.uniform1i(maskU.u_effectedTex, 1)
+          if(maskU.u_res)         gl.uniform2f(maskU.u_res, write.w, write.h)
+          if(maskU.u_mouse && mouse) gl.uniform2f(maskU.u_mouse, mouse.x, mouse.y)
+          if(maskU.u_maskRadius)   gl.uniform1f(maskU.u_maskRadius, layer.mask.radius || 0.3)
+          if(maskU.u_maskSoftness) gl.uniform1f(maskU.u_maskSoftness, layer.mask.softness || 0.3)
+          if(maskU.u_maskInvert)   gl.uniform1f(maskU.u_maskInvert, layer.mask.invert ? 1 : 0)
+          if(maskU.u_maskFeather)  gl.uniform1f(maskU.u_maskFeather, layer.mask.feather || 0.1)
+          gl.drawArrays(gl.TRIANGLES, 0, 3)
+          t = read; read = write; write = t
+        }
+      } else {
+        // Sprite/shape/text — render onto current `read` with alpha blending
+        gl.bindFramebuffer(gl.FRAMEBUFFER, read.fbo)
+        gl.viewport(0, 0, W, H)
+        gl.enable(gl.BLEND)
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+        if((layer.type === 'image' || layer.type === 'text') && layer.tex){
+          gl.useProgram(spriteProg)
+          gl.bindVertexArray(spriteVAO)
+          gl.uniform2f(spriteU.u_canvasSize, W, H)
+          gl.uniform1i(spriteU.u_tex, 0)
+          drawSprite(layer)
+        } else if(layer.type === 'shape'){
+          gl.useProgram(shapeProg)
+          drawShape(layer)
+        }
+        gl.disable(gl.BLEND)
       }
     }
-    gl.disable(gl.BLEND)
 
-    let read = fboA, write = fboB
-    for(const layer of effects){
-      if(!layer.enabled) continue
-      const entry = effectPrograms.get(layer.id)
-      if(!entry) continue
-      gl.useProgram(entry.prog)
-      gl.bindVertexArray(fsVAO)
-      gl.bindFramebuffer(gl.FRAMEBUFFER, write.fbo)
-      gl.viewport(0, 0, write.w, write.h)
-      gl.activeTexture(gl.TEXTURE0)
-      gl.bindTexture(gl.TEXTURE_2D, read.tex)
-      if(entry.u.u_tex)   gl.uniform1i(entry.u.u_tex, 0)
-      if(entry.u.u_res)   gl.uniform2f(entry.u.u_res, write.w, write.h)
-      if(entry.u.u_mouse && mouse) gl.uniform2f(entry.u.u_mouse, mouse.x, mouse.y)
-      setUniforms(entry.u, { ...layer.values, u_time: time })
-      gl.drawArrays(gl.TRIANGLES, 0, 3)
-      const t = read; read = write; write = t
-    }
-
-    gl.useProgram(copyProg)
-    gl.bindVertexArray(fsVAO)
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
-    gl.viewport(0, 0, W, H)
-    gl.activeTexture(gl.TEXTURE0)
-    gl.bindTexture(gl.TEXTURE_2D, read.tex)
-    gl.uniform1i(copyU.u_tex, 0)
-    gl.drawArrays(gl.TRIANGLES, 0, 3)
+    // Final blit to screen
+    blitFBO(read.tex, null, W, H)
   }
 
   return { gl, resize, uploadTexture, deleteTexture, registerEffect, render, get size(){ return { W, H } } }
