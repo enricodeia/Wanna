@@ -1,4 +1,4 @@
-# PRESS
+# Wanna
 
 Collage + shader playground. ~110 WebGL2 effects, drag-to-position images, pen tool, text, cursor-following effects, and webm video recording — all in the browser.
 

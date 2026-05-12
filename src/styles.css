@@ -50,9 +50,21 @@ button{ background: none; border: 0; cursor: pointer; padding: 0; color: inherit
   position: relative;
   gap: 16px;
 }
-.brand{ display: flex; align-items: baseline; gap: 10px; flex-shrink: 0; }
-.brand .logo{ font-size: 15px; font-weight: 700; letter-spacing: -0.01em; }
-.brand .sub{ font-size: 11px; color: var(--mute); }
+.brand{ display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.brand .logo{ font-size: 15px; font-weight: 700; letter-spacing: -0.01em; line-height: 1; }
+.brand .sub{ font-size: 11px; color: var(--mute); align-self: baseline; }
+.brand-mark{
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.brand-mark .dot{
+  width: 6px;
+  height: 6px;
+  background: var(--ink);
+  border-radius: 50%;
+  display: inline-block;
+}
 
 .tools{
   display: flex;
