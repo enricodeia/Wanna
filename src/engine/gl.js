@@ -439,6 +439,18 @@ export function createEngine(canvas){
     gl.activeTexture(gl.TEXTURE0)
     gl.bindTexture(gl.TEXTURE_2D, read.tex)
     if(entry.u.u_tex) gl.uniform1i(entry.u.u_tex, 0)
+    // Bind any auxiliary textures the layer carries (e.g. ASCII glyph atlas).
+    // _textures is an array of { name: '<sampler uniform>', tex: { tex } }.
+    if(effect._textures){
+      let unit = 1
+      for(const t of effect._textures){
+        if(!t || !t.tex) continue
+        gl.activeTexture(gl.TEXTURE0 + unit)
+        gl.bindTexture(gl.TEXTURE_2D, t.tex.tex)
+        if(entry.u[t.name] != null) gl.uniform1i(entry.u[t.name], unit)
+        unit++
+      }
+    }
     if(entry.u.u_res) gl.uniform2f(entry.u.u_res, write.w, write.h)
     if(entry.u.u_mouse && mouse) gl.uniform2f(entry.u.u_mouse, mouse.x, mouse.y)
     setUniforms(entry.u, { ...effect.values, u_time: time })

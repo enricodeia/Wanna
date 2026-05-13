@@ -446,11 +446,31 @@ export default function App(){
   }, [addImage])
 
   // ============ Layer ops ============
+  // Helper: clean up any GL textures attached to a layer (sprite tex, shape image, derived effect textures).
+  const disposeLayerTextures = (l) => {
+    if(!l || !engineRef.current) return
+    if(l.tex) engineRef.current.deleteTexture(l.tex)
+    if(l.imageTex) engineRef.current.deleteTexture(l.imageTex)
+    if(l._textures) for(const t of l._textures) engineRef.current.deleteTexture(t.tex)
+  }
+  // Helper: run an effect's derive() and return { _textures, mergedValues }.
+  // Disposes any prior textures attached to the layer first.
+  const runDerive = (layer) => {
+    if(!engineRef.current || layer.type !== 'effect') return null
+    const fx = EFFECTS[layer.effectId]
+    if(!fx?.derive) return null
+    if(layer._textures) for(const t of layer._textures) engineRef.current.deleteTexture(t.tex)
+    const result = fx.derive(layer.values, engineRef.current)
+    if(!result) return { _textures: null, mergedValues: layer.values }
+    return {
+      _textures: result.textures || null,
+      mergedValues: { ...layer.values, ...(result.uniforms || {}) }
+    }
+  }
   const removeLayer = (uid) => {
     setLayers((s) => {
       const l = s.find(x => x.uid === uid)
-      if(l && l.tex && engineRef.current) engineRef.current.deleteTexture(l.tex)
-      if(l && l.imageTex && engineRef.current) engineRef.current.deleteTexture(l.imageTex)
+      disposeLayerTextures(l)
       return s.filter(x => x.uid !== uid)
     })
     if(selectedUid === uid) setSelectedUid(null)
@@ -467,7 +487,13 @@ export default function App(){
           x: (src.x || 0) + 0.05, y: (src.y || 0) + 0.05 }
       } else if(src.type === 'effect'){
         dup = { ...src, uid: crypto.randomUUID(), values: { ...src.values },
-          mask: src.mask ? { ...src.mask } : { ...DEFAULT_MASK } }
+          mask: src.mask ? { ...src.mask } : { ...DEFAULT_MASK },
+          _textures: null }
+        const derived = runDerive(dup)
+        if(derived){
+          dup._textures = derived._textures
+          dup.values = derived.mergedValues
+        }
       } else {
         dup = { ...src, uid: crypto.randomUUID(),
           transform: { ...src.transform, x: src.transform.x + 0.05, y: src.transform.y + 0.05 } }
@@ -543,14 +569,34 @@ export default function App(){
     }))
   }
   const updateEffectValue = (uid, key, value) => {
-    setLayers((s) => s.map(l => l.uid === uid && l.type === 'effect' ? {
-      ...l, values: { ...l.values, [key]: value }
-    } : l))
+    setLayers((s) => s.map(l => {
+      if(l.uid !== uid || l.type !== 'effect') return l
+      const next = { ...l, values: { ...l.values, [key]: value } }
+      const fx = EFFECTS[l.effectId]
+      if(fx?.derive && fx.derivedKeys?.includes(key)){
+        const derived = runDerive(next)
+        if(derived){
+          next._textures = derived._textures
+          next.values = derived.mergedValues
+        }
+      }
+      return next
+    }))
   }
   const resetEffect = (uid) => {
-    setLayers((s) => s.map(l => l.uid === uid && l.type === 'effect' ? {
-      ...l, values: defaultValues(l.effectId)
-    } : l))
+    setLayers((s) => s.map(l => {
+      if(l.uid !== uid || l.type !== 'effect') return l
+      const next = { ...l, values: defaultValues(l.effectId) }
+      const fx = EFFECTS[l.effectId]
+      if(fx?.derive){
+        const derived = runDerive(next)
+        if(derived){
+          next._textures = derived._textures
+          next.values = derived.mergedValues
+        }
+      }
+      return next
+    }))
   }
   const updateMask = (uid, key, value) => {
     setLayers((s) => s.map(l => l.uid === uid && l.type === 'effect' ? {
@@ -709,6 +755,11 @@ export default function App(){
         values: defaultValues(effectId),
         mask: { ...DEFAULT_MASK }
       }
+      const derived = runDerive(layer)
+      if(derived){
+        layer._textures = derived._textures
+        layer.values = derived.mergedValues
+      }
       setSelectedUid(layer.uid)
       return [...s, layer]
     })
@@ -729,6 +780,11 @@ export default function App(){
         values: defaultValues(effectId),
         mask: { ...DEFAULT_MASK },
         scopedTo: parentUid
+      }
+      const derived = runDerive(fx)
+      if(derived){
+        fx._textures = derived._textures
+        fx.values = derived.mergedValues
       }
       setSelectedUid(fx.uid)
       return [...s.slice(0, insertAt), fx, ...s.slice(insertAt)]

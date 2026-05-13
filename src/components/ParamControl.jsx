@@ -1,4 +1,4 @@
-import React, { useRef } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 
 const rgb2hex = (c) => {
   const t = (x) => Math.round(Math.max(0, Math.min(1, x)) * 255).toString(16).padStart(2, '0')
@@ -21,15 +21,57 @@ const clampSnap = (v, p) => {
   return v
 }
 
-export default function ParamControl({ param, value, onChange }){
-  const inputRef = useRef(null)
+// Input that lets the user type freely (uncontrolled-while-focused). The displayed
+// formatted value only re-syncs when the field is blurred or the external value
+// changes while not focused. Commit on Enter / blur / Escape (escape reverts).
+function NumField({ value, param, onChange }){
+  const [draft, setDraft] = useState(formatVal(value, param.step))
+  const focusedRef = useRef(false)
+  useEffect(() => {
+    if(!focusedRef.current) setDraft(formatVal(value, param.step))
+  }, [value, param.step])
+  const commit = () => {
+    const v = parseFloat(draft)
+    if(Number.isNaN(v)){
+      setDraft(formatVal(value, param.step))
+    } else {
+      const c = clampSnap(v, param)
+      onChange(c)
+      setDraft(formatVal(c, param.step))
+    }
+  }
+  return (
+    <input
+      className="numinput"
+      type="text"
+      inputMode="decimal"
+      value={draft}
+      onFocus={(e) => { focusedRef.current = true; e.target.select() }}
+      onChange={(e) => setDraft(e.target.value)}
+      onKeyDown={(e) => {
+        if(e.key === 'Enter'){ e.preventDefault(); e.target.blur() }
+        else if(e.key === 'Escape'){ setDraft(formatVal(value, param.step)); e.target.blur() }
+        else if(e.key === 'ArrowUp' || e.key === 'ArrowDown'){
+          e.preventDefault()
+          const dir = e.key === 'ArrowUp' ? 1 : -1
+          const mult = e.shiftKey ? 10 : (e.altKey ? 0.1 : 1)
+          const next = clampSnap(value + dir * param.step * mult, param)
+          onChange(next)
+          setDraft(formatVal(next, param.step))
+        }
+      }}
+      onBlur={() => { focusedRef.current = false; commit() }}
+    />
+  )
+}
 
+export default function ParamControl({ param, value, onChange }){
   if(param.type === 'range'){
     const pct = ((value - param.min) / (param.max - param.min)) * 100
-    const display = formatVal(value, param.step)
 
     const startScrub = (e) => {
       if(e.button !== 0) return
+      // Don't start scrubbing if user is double-clicking on the label to reset
       e.preventDefault()
       const startX = e.clientX
       const startVal = value
@@ -54,11 +96,6 @@ export default function ParamControl({ param, value, onChange }){
 
     const onDouble = () => onChange(param.default)
 
-    const onNumChange = (e) => {
-      const v = parseFloat(e.target.value)
-      if(!Number.isNaN(v)) onChange(clampSnap(v, param))
-    }
-
     return (
       <div className="param">
         <div className="param-h">
@@ -66,17 +103,9 @@ export default function ParamControl({ param, value, onChange }){
             className="label-scrub"
             onPointerDown={startScrub}
             onDoubleClick={onDouble}
-            title="drag to scrub · double-click to reset"
+            title="drag to scrub · double-click to reset · click box to type"
           >{param.label}</span>
-          <input
-            ref={inputRef}
-            className="numinput"
-            type="text"
-            inputMode="decimal"
-            value={display}
-            onChange={onNumChange}
-            onBlur={(e) => { const v = parseFloat(e.target.value); if(!Number.isNaN(v)) onChange(clampSnap(v, param)) }}
-          />
+          <NumField value={value} param={param} onChange={onChange} />
         </div>
         <input
           className="range"
@@ -149,5 +178,30 @@ export default function ParamControl({ param, value, onChange }){
       </div>
     )
   }
+
+  if(param.type === 'text'){
+    return (
+      <div className="param">
+        <div className="param-h">
+          <span
+            className="label-scrub"
+            onDoubleClick={() => onChange(param.default)}
+            title="double-click to reset"
+          >{param.label}</span>
+          {value && <span className="v">{[...String(value)].length} ch</span>}
+        </div>
+        <input
+          className="text-input"
+          type="text"
+          value={value || ''}
+          placeholder={param.placeholder || ''}
+          onChange={(e) => onChange(e.target.value)}
+          spellCheck={false}
+        />
+        {param.hint && <div className="param-hint">{param.hint}</div>}
+      </div>
+    )
+  }
+
   return null
 }

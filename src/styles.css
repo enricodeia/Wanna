@@ -1077,6 +1077,27 @@ button{ background: none; border: 0; cursor: pointer; padding: 0; color: inherit
 }
 .text-edit:focus{ border-color: var(--ink); }
 
+/* Text param input (charsets, glyphs, etc.) */
+.text-input{
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--line-strong);
+  background: var(--paper);
+  padding: 7px 9px;
+  outline: none;
+  border-radius: 3px;
+}
+.text-input:focus{ border-color: var(--ink); }
+.param-hint{
+  font-size: 9px;
+  color: var(--mute);
+  letter-spacing: 0.04em;
+  margin-top: 4px;
+  text-transform: uppercase;
+}
+
 /* ============ Scoped effects (effect bound to a specific layer) ============ */
 .layer.scoped-effect{
   padding-left: 28px;

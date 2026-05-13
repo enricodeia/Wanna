@@ -32,13 +32,16 @@ vec2 sCenter(vec2 uv){ return uv - 0.5; }
 
 // ============ DISTORT ============
 const HALFTONE = `${HEADER}
-uniform float u_scale, u_softness, u_angleC, u_angleM, u_angleY, u_angleK, u_mix, u_invert;
+uniform float u_scale, u_softness, u_angleC, u_angleM, u_angleY, u_angleK, u_mix, u_invert, u_jitter;
 uniform vec3 u_paper;
 float dg(vec2 uv, float a, float s){
   vec2 p = (uv - 0.5) * u_res;
   p = rot(a) * p;
   vec2 g = p / s;
-  vec2 gf = g - (floor(g) + 0.5);
+  // jitter each cell center by a small hash-based offset for an organic feel
+  vec2 cellId = floor(g);
+  vec2 jit = (vec2(hash(cellId), hash(cellId + 13.7)) - 0.5) * u_jitter;
+  vec2 gf = g - (floor(g) + 0.5 + jit);
   return length(gf) * 2.0;
 }
 void main(){
@@ -60,36 +63,27 @@ void main(){
   o = vec4(mix(col, c, u_mix), 1.0);
 }`
 
+// ASCII — samples a glyph atlas built at runtime from the user's charset
+// (any string: ASCII, unicode, emoji). Cells are sized by u_cell with
+// height = u_cell * u_aspect. Atlas is bound to u_atlas (TEXTURE1).
 const ASCII = `${HEADER}
-uniform float u_cell, u_charset, u_invert, u_mix;
+uniform sampler2D u_atlas;
+uniform float u_glyphCount;
+uniform float u_cell, u_aspect, u_invert, u_mix;
 uniform vec3 u_fg, u_bg;
-float charBit(int idx, int x, int y){
-  int bits = 0;
-  if(idx == 0) bits = 0;
-  else if(idx == 1){ if(x==2 && y==4) bits=1; }
-  else if(idx == 2){ if(x==2 && (y==1||y==3)) bits=1; }
-  else if(idx == 3){ if(y==2 && x>0 && x<4) bits=1; }
-  else if(idx == 4){ if((y==2 && x>0 && x<4) || (x==2 && y>0 && y<4)) bits=1; }
-  else if(idx == 5){ if((y==1 || y==3) && x>0 && x<4) bits=1; }
-  else if(idx == 6){ if((x==1 || x==3) || (y==1 || y==3)) bits=1; }
-  else if(idx == 7){
-    if(x==0 || x==4 || y==0 || y==4) bits=1;
-    if(x==2 && y==2) bits=1;
-    if((x==1||x==3) && (y==1||y==3)) bits=1;
-  }
-  return float(bits);
-}
 void main(){
-  vec2 cell = vec2(u_cell);
-  vec2 c = floor(v_uv * u_res / cell) * cell + cell * 0.5;
-  vec3 col = texture(u_tex, c / u_res).rgb;
+  vec2 cell = vec2(u_cell, u_cell * u_aspect);
+  vec2 cellOrigin = floor(v_uv * u_res / cell) * cell;
+  vec2 cellCenter = cellOrigin + cell * 0.5;
+  vec3 col = texture(u_tex, cellCenter / u_res).rgb;
   float l = luma(col);
   if(u_invert > 0.5) l = 1.0 - l;
-  int n = int(clamp(u_charset, 2.0, 8.0));
-  int idx = int(floor(l * float(n - 1) + 0.5));
-  vec2 inCell = floor((v_uv * u_res - (c - cell*0.5)) / (cell / 5.0));
-  inCell = clamp(inCell, vec2(0.0), vec2(4.0));
-  float m = charBit(idx, int(inCell.x), int(inCell.y));
+  float n = max(u_glyphCount, 1.0);
+  float idx = floor(l * (n - 0.001));
+  vec2 inCell = clamp((v_uv * u_res - cellOrigin) / cell, vec2(0.0), vec2(0.9999));
+  // texture is uploaded with FLIP_Y, so flip y when sampling the atlas
+  vec2 atlasUV = vec2((idx + inCell.x) / n, 1.0 - inCell.y);
+  float m = texture(u_atlas, atlasUV).r;
   o = vec4(mix(col, mix(u_bg, u_fg, m), u_mix), 1.0);
 }`
 
@@ -887,17 +881,20 @@ void main(){
 
 // ============ NEW PATTERN ============
 const DOTS_GRID = `${HEADER}
-uniform float u_density, u_size, u_invert, u_mix;
+uniform float u_density, u_size, u_invert, u_jitter, u_softness, u_mix;
 uniform vec3 u_ink, u_paper;
 void main(){
   vec3 col = texture(u_tex, v_uv).rgb;
   float l = luma(col);
   vec2 g = v_uv * u_density;
-  vec2 gf = fract(g) - 0.5;
+  vec2 cellId = floor(g);
+  vec2 jit = (vec2(hash(cellId), hash(cellId + 11.3)) - 0.5) * u_jitter;
+  vec2 gf = fract(g) - 0.5 - jit;
   float r = length(gf) * 2.0;
   float thresh = u_invert > 0.5 ? l : (1.0 - l);
-  float dot = step(r, u_size * thresh);
-  vec3 res = mix(u_paper, u_ink, dot);
+  float soft = max(u_softness, 0.001);
+  float dotV = 1.0 - smoothstep(u_size * thresh - soft, u_size * thresh + soft, r);
+  vec3 res = mix(u_paper, u_ink, dotV);
   o = vec4(mix(col, res, u_mix), 1.0);
 }`
 
@@ -2257,6 +2254,46 @@ void main(){
 const c = (r,g,b)=>[r,g,b]
 const BLACK = c(0,0,0), WHITE = c(1,1,1)
 
+// Renders any string of characters (ASCII / unicode / emoji) into a single-row
+// atlas canvas. Each glyph occupies a square cell. Returns null if the string
+// is empty after trimming. Caller uploads the canvas as a GL texture.
+function buildGlyphAtlasCanvas(charset, opts = {}){
+  const cellPx = opts.cellPx || 32
+  const fontFamily = opts.font || '"JetBrains Mono", "Menlo", monospace'
+  const weight = opts.weight || 'bold'
+  const chars = [...String(charset || '')].slice(0, 128)
+  if(chars.length === 0) return null
+  const canvas = document.createElement('canvas')
+  canvas.width = cellPx * chars.length
+  canvas.height = cellPx
+  const ctx = canvas.getContext('2d')
+  ctx.fillStyle = '#000000'
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+  ctx.fillStyle = '#ffffff'
+  const fontPx = Math.floor(cellPx * 0.78)
+  ctx.font = `${weight} ${fontPx}px ${fontFamily}`
+  ctx.textBaseline = 'middle'
+  ctx.textAlign = 'center'
+  for(let i = 0; i < chars.length; i++){
+    ctx.fillText(chars[i], i * cellPx + cellPx / 2, canvas.height / 2 + 1)
+  }
+  return { canvas, count: chars.length }
+}
+
+// derive() runs whenever a derived param value (listed in derivedKeys) changes.
+// It returns { textures: [{name, tex}], uniforms: {...} } and the app handles
+// uploading the textures + merging the extra uniforms into layer.values.
+function deriveAsciiAtlas(values, engine){
+  if(!engine) return null
+  const built = buildGlyphAtlasCanvas(values.u_charset || ' .:-=+*#%@')
+  if(!built) return null
+  const tex = engine.uploadTexture(built.canvas)
+  return {
+    textures: [{ name: 'u_atlas', tex }],
+    uniforms: { u_glyphCount: built.count }
+  }
+}
+
 export const EFFECTS = {
   // 3D MAPPING — own category, its own rules
   mapping3d: { id:'mapping3d', label:'3D MAPPING', group:'3D MAPPING', fs: MAPPING_3D, params: [
@@ -2432,6 +2469,7 @@ export const EFFECTS = {
   halftone:  { id:'halftone', label:'HALFTONE', group:'PRINT', fs: HALFTONE, params: [
     { key:'u_scale',    label:'scale',    type:'range', min:2, max:80, step:0.5, default:12 },
     { key:'u_softness', label:'softness', type:'range', min:0, max:1, step:0.01, default:0.15 },
+    { key:'u_jitter',   label:'jitter',   type:'range', min:0, max:1, step:0.01, default:0 },
     { key:'u_angleC',   label:'angle C',  type:'range', min:0, max:180, step:1, default:15 },
     { key:'u_angleM',   label:'angle M',  type:'range', min:0, max:180, step:1, default:75 },
     { key:'u_angleY',   label:'angle Y',  type:'range', min:0, max:180, step:1, default:0 },
@@ -2440,14 +2478,22 @@ export const EFFECTS = {
     { key:'u_invert',   label:'invert',   type:'toggle', default:false },
     { key:'u_mix',      label:'mix',      type:'range', min:0, max:1, step:0.01, default:1 }
   ]},
-  ascii:     { id:'ascii', label:'ASCII', group:'PRINT', fs: ASCII, params: [
-    { key:'u_cell',    label:'cell',    type:'range', min:4, max:40, step:1, default:10 },
-    { key:'u_charset', label:'charset', type:'range', min:2, max:8, step:1, default:8 },
-    { key:'u_fg',      label:'ink',     type:'color', default: BLACK },
-    { key:'u_bg',      label:'paper',   type:'color', default: WHITE },
-    { key:'u_invert',  label:'invert',  type:'toggle', default:false },
-    { key:'u_mix',     label:'mix',     type:'range', min:0, max:1, step:0.01, default:1 }
-  ]},
+  ascii: {
+    id:'ascii', label:'ASCII', group:'PRINT', fs: ASCII,
+    derivedKeys: ['u_charset'],
+    derive: deriveAsciiAtlas,
+    params: [
+      { key:'u_charset', label:'glyphs', type:'text', default:' .:-=+*#%@',
+        placeholder:'characters / unicode / emoji',
+        hint:'left = light · right = dark — try " .,oO0@" or "🌑🌒🌓🌔🌕"' },
+      { key:'u_cell',    label:'cell',         type:'range', min:4, max:60, step:1,    default:12 },
+      { key:'u_aspect',  label:'cell aspect',  type:'range', min:0.5, max:3, step:0.01, default:1.6 },
+      { key:'u_invert',  label:'invert',       type:'toggle', default:false },
+      { key:'u_fg',      label:'ink',          type:'color', default: BLACK },
+      { key:'u_bg',      label:'paper',        type:'color', default: WHITE },
+      { key:'u_mix',     label:'mix',          type:'range', min:0, max:1, step:0.01, default:1 }
+    ]
+  },
   dither:    { id:'dither', label:'DITHER', group:'PRINT', fs: DITHER, params: [
     { key:'u_levels', label:'levels', type:'range', min:2, max:16, step:1, default:4 },
     { key:'u_scale',  label:'scale',  type:'range', min:1, max:12, step:1, default:2 },
@@ -2674,12 +2720,14 @@ export const EFFECTS = {
 
   // === NEW PATTERN ===
   dotsGrid: { id:'dotsGrid', label:'DOTS GRID', group:'PATTERN', fs: DOTS_GRID, params: [
-    { key:'u_density', label:'density', type:'range', min:5, max:200, step:1, default:60 },
-    { key:'u_size',    label:'size',    type:'range', min:0.1, max:2, step:0.01, default:1 },
-    { key:'u_invert',  label:'invert',  type:'toggle', default:false },
-    { key:'u_ink',     label:'ink',     type:'color', default: BLACK },
-    { key:'u_paper',   label:'paper',   type:'color', default: WHITE },
-    { key:'u_mix',     label:'mix',     type:'range', min:0, max:1, step:0.01, default:1 }
+    { key:'u_density',  label:'density',  type:'range', min:5, max:200, step:1, default:60 },
+    { key:'u_size',     label:'size',     type:'range', min:0.1, max:2, step:0.01, default:1 },
+    { key:'u_softness', label:'softness', type:'range', min:0, max:1, step:0.01, default:0.05 },
+    { key:'u_jitter',   label:'jitter',   type:'range', min:0, max:1, step:0.01, default:0 },
+    { key:'u_invert',   label:'invert',   type:'toggle', default:false },
+    { key:'u_ink',      label:'ink',      type:'color', default: BLACK },
+    { key:'u_paper',    label:'paper',    type:'color', default: WHITE },
+    { key:'u_mix',      label:'mix',      type:'range', min:0, max:1, step:0.01, default:1 }
   ]},
   checkerboard: { id:'checkerboard', label:'CHECKERBOARD', group:'PATTERN', fs: CHECKERBOARD, params: [
     { key:'u_count',      label:'count',      type:'range', min:2, max:80, step:1, default:16 },
