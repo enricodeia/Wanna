@@ -258,9 +258,9 @@ export default function App(){
       engineRef.current = eng
       for(const id of Object.keys(EFFECTS)){
         try { eng.registerEffect(id, EFFECTS[id].fs) }
-        catch(shaderErr){ console.error(`[wanna] effect "${id}":`, shaderErr); throw new Error(`effect "${id}": ${shaderErr.message || shaderErr}`) }
+        catch(shaderErr){ console.error(`[bianca] effect "${id}":`, shaderErr); throw new Error(`effect "${id}": ${shaderErr.message || shaderErr}`) }
       }
-    } catch (e){ console.error('[wanna] engine bootstrap failed:', e); setErr(e.message || String(e)); return }
+    } catch (e){ console.error('[bianca] engine bootstrap failed:', e); setErr(e.message || String(e)); return }
 
     const resize = () => {
       const rect = canvas.getBoundingClientRect()
@@ -815,7 +815,7 @@ export default function App(){
     canvasRef.current.toBlob((blob) => {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
-      a.href = url; a.download = `wanna-${Date.now()}.png`; a.click()
+      a.href = url; a.download = `bianca-tool-${Date.now()}.png`; a.click()
       setTimeout(() => URL.revokeObjectURL(url), 1000)
     }, 'image/png')
   }
@@ -835,7 +835,7 @@ export default function App(){
       const blob = new Blob(chunks, { type: 'video/webm' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
-      a.href = url; a.download = `wanna-${Date.now()}.webm`; a.click()
+      a.href = url; a.download = `bianca-tool-${Date.now()}.webm`; a.click()
       setTimeout(() => URL.revokeObjectURL(url), 1500)
       setRecording(false); setRecCountdown(0); recorderRef.current = null
     }
@@ -1126,7 +1126,7 @@ export default function App(){
       {/* TOP BAR */}
       <div className="topbar">
         <div className="brand">
-          <span className="logo">Wanna</span>
+          <span className="logo">Bianca Tool</span>
         </div>
         <div className="tools">
           <button className={'tool-btn ' + (tool === 'select' ? 'on' : '')} onClick={() => { setTool('select'); cancelDrawing() }} title="Select (V)">SELECT</button>
