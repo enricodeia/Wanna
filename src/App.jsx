@@ -3,7 +3,7 @@ import { createEngine, transformShapePoints, shapeCentroid } from './engine/gl.j
 import { EFFECTS, defaultValues } from './effects/index.js'
 import ParamControl from './components/ParamControl.jsx'
 
-const GROUPS = ['INTERACT', 'DISTORT', 'PRINT', 'PATTERN', 'COLOR', 'LIGHT', 'STYLIZE', 'FOCUS', 'GLITCH']
+const GROUPS = ['3D MAPPING', 'INTERACT', 'DISTORT', 'PRINT', 'PATTERN', 'COLOR', 'LIGHT', 'STYLIZE', 'FOCUS', 'GLITCH']
 
 const ASPECTS = [
   { id: '1:1',  w: 1, h: 1 },
@@ -189,6 +189,9 @@ export default function App(){
   // Drag-reorder state: { uid, overUid, position } where position is 'before'/'after'
   const [dragOver, setDragOver] = useState(null)
   const dragUidRef = useRef(null)
+  // Drag-from-library: holds the effect id while it's being dragged
+  const dragEffectIdRef = useRef(null)
+  const [dragEffectOverUid, setDragEffectOverUid] = useState(null)
 
   const [recDuration, setRecDuration] = useState(5)
   const [recording, setRecording] = useState(false)
@@ -612,7 +615,16 @@ export default function App(){
     e.dataTransfer.effectAllowed = 'move'
     try { e.dataTransfer.setData('text/plain', uid) } catch(_){}
   }
-  const onLayerDragOver = (e, overUid) => {
+  const onLayerDragOver = (e, overUid, layer) => {
+    // Effect-from-library drag: highlight any sprite/shape/text layer card as a drop target.
+    if(dragEffectIdRef.current){
+      if(layer && layer.type !== 'effect'){
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'copy'
+        setDragEffectOverUid(overUid)
+      }
+      return
+    }
     if(!dragUidRef.current || dragUidRef.current === overUid) return
     e.preventDefault()
     e.dataTransfer.dropEffect = 'move'
@@ -620,9 +632,19 @@ export default function App(){
     const position = (e.clientY - rect.top) < rect.height / 2 ? 'before' : 'after'
     setDragOver({ overUid, position })
   }
-  const onLayerDragLeave = () => setDragOver(null)
-  const onLayerDrop = (e, overUid) => {
+  const onLayerDragLeave = () => { setDragOver(null); setDragEffectOverUid(null) }
+  const onLayerDrop = (e, overUid, layer) => {
     e.preventDefault()
+    // Effect from library dropped onto a sprite/shape/text layer → scope it.
+    if(dragEffectIdRef.current){
+      const fxId = dragEffectIdRef.current
+      dragEffectIdRef.current = null
+      setDragEffectOverUid(null)
+      if(layer && layer.type !== 'effect' && EFFECTS[fxId]){
+        assignEffectToLayer(fxId, overUid)
+      }
+      return
+    }
     const fromUid = dragUidRef.current
     if(!fromUid || !overUid || fromUid === overUid){ dragUidRef.current = null; setDragOver(null); return }
     const dragInfo = dragOver
@@ -643,7 +665,41 @@ export default function App(){
     dragUidRef.current = null
     setDragOver(null)
   }
-  const onLayerDragEnd = () => { dragUidRef.current = null; setDragOver(null) }
+  const onLayerDragEnd = () => {
+    dragUidRef.current = null
+    dragEffectIdRef.current = null
+    setDragOver(null)
+    setDragEffectOverUid(null)
+  }
+
+  // Library item drag handlers — drag an effect onto an image/shape/text layer.
+  const onEffectDragStart = (e, effectId) => {
+    dragEffectIdRef.current = effectId
+    e.dataTransfer.effectAllowed = 'copy'
+    try { e.dataTransfer.setData('text/plain', `fx:${effectId}`) } catch(_){}
+  }
+  const onEffectDragEnd = () => {
+    dragEffectIdRef.current = null
+    setDragEffectOverUid(null)
+  }
+  // Drop an effect anywhere on the canvas to scope it to the layer at that point.
+  const onCanvasDragOver = (e) => {
+    if(dragEffectIdRef.current){ e.preventDefault(); e.dataTransfer.dropEffect = 'copy' }
+  }
+  const onCanvasDrop = (e) => {
+    if(!dragEffectIdRef.current) return
+    e.preventDefault()
+    e.stopPropagation()
+    const fxId = dragEffectIdRef.current
+    dragEffectIdRef.current = null
+    setDragEffectOverUid(null)
+    const rect = canvasRef.current.getBoundingClientRect()
+    const px = (e.clientX - rect.left) / rect.width
+    const py = (e.clientY - rect.top) / rect.height
+    const hit = hitTest(px, py, rect.width, rect.height)
+    if(hit && hit.el && EFFECTS[fxId]) assignEffectToLayer(fxId, hit.el.uid)
+    else if(EFFECTS[fxId]) addEffect(fxId) // dropped on empty space → global effect
+  }
 
   const addEffect = (effectId) => {
     setLayers((s) => {
@@ -656,6 +712,34 @@ export default function App(){
       setSelectedUid(layer.uid)
       return [...s, layer]
     })
+  }
+  // Assign an effect from the library to a specific layer (image / shape / text).
+  // The scoped effect is inserted directly after its parent in the stack so it stays
+  // grouped with the layer it belongs to.
+  const assignEffectToLayer = (effectId, parentUid) => {
+    setLayers((s) => {
+      const i = s.findIndex(l => l.uid === parentUid)
+      if(i < 0) return s
+      // Insert after the parent and after any existing scoped effects of the same parent
+      let insertAt = i + 1
+      while(insertAt < s.length && s[insertAt].type === 'effect' && s[insertAt].scopedTo === parentUid) insertAt++
+      const fx = {
+        uid: crypto.randomUUID(), type: 'effect',
+        effectId, visible: true, _follow: false,
+        values: defaultValues(effectId),
+        mask: { ...DEFAULT_MASK },
+        scopedTo: parentUid
+      }
+      setSelectedUid(fx.uid)
+      return [...s.slice(0, insertAt), fx, ...s.slice(insertAt)]
+    })
+  }
+  const unscopeEffect = (uid) => {
+    setLayers((s) => s.map(l => {
+      if(l.uid !== uid || l.type !== 'effect') return l
+      const { scopedTo, ...rest } = l
+      return rest
+    }))
   }
   const clearAllLayers = () => { setLayers([]); setSelectedUid(null) }
   const clearAllEffects = () => {
@@ -1042,15 +1126,7 @@ export default function App(){
       {/* TOP BAR */}
       <div className="topbar">
         <div className="brand">
-          <span className="brand-mark" aria-label="Wanna">
-            <svg className="brand-svg" viewBox="0 0 28 28" width="22" height="22">
-              <circle cx="14" cy="8" r="3" fill="currentColor"/>
-              <circle cx="8" cy="20" r="3" fill="currentColor"/>
-              <circle cx="20" cy="20" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.6"/>
-            </svg>
-          </span>
           <span className="logo">Wanna</span>
-          <span className="sub">collage · {Object.keys(EFFECTS).length} shaders</span>
         </div>
         <div className="tools">
           <button className={'tool-btn ' + (tool === 'select' ? 'on' : '')} onClick={() => { setTool('select'); cancelDrawing() }} title="Select (V)">SELECT</button>
@@ -1134,7 +1210,12 @@ export default function App(){
             {(!collapsedCats.has(grp) || search) && (
               <div className="cat-list">
                 {grouped[grp].map((e) => (
-                  <button key={e.id} className="cat-item" onClick={() => addEffect(e.id)}>
+                  <button key={e.id} className="cat-item"
+                    draggable
+                    onDragStart={(ev) => onEffectDragStart(ev, e.id)}
+                    onDragEnd={onEffectDragEnd}
+                    onClick={() => addEffect(e.id)}
+                    title="click to add globally · drag onto a layer to scope it">
                     <span className="cat-item-label">{e.label}</span>
                     <span className="add">+</span>
                   </button>
@@ -1149,7 +1230,9 @@ export default function App(){
 
       {/* CENTER */}
       <div className="center">
-        <div className={'canvas-wrap tool-' + tool} style={aspectStyle}>
+        <div className={'canvas-wrap tool-' + tool} style={aspectStyle}
+          onDragOver={onCanvasDragOver}
+          onDrop={onCanvasDrop}>
           <div className="canvas-tag">{layers.length} layers · {activeEffects} fx{recording ? ` · REC ${recCountdown}s` : ''}</div>
           <canvas ref={canvasRef}
             onPointerDown={onCanvasPointerDown}
@@ -1245,16 +1328,18 @@ export default function App(){
               <div key={ll.uid}
                 draggable={renaming?.uid !== ll.uid}
                 onDragStart={(e) => onLayerDragStart(e, ll.uid)}
-                onDragOver={(e) => onLayerDragOver(e, ll.uid)}
+                onDragOver={(e) => onLayerDragOver(e, ll.uid, ll)}
                 onDragLeave={onLayerDragLeave}
-                onDrop={(e) => onLayerDrop(e, ll.uid)}
+                onDrop={(e) => onLayerDrop(e, ll.uid, ll)}
                 onDragEnd={onLayerDragEnd}
                 className={
                   'layer card-layer '
                   + (ll.type === 'effect' ? 'is-effect ' : '')
+                  + (ll.scopedTo ? 'scoped-effect ' : '')
                   + (ll.uid === selectedUid ? 'selected ' : '')
                   + (ll.visible ? '' : 'disabled ')
                   + (isOver ? `drop-target drop-${dragOver.position} ` : '')
+                  + (dragEffectOverUid === ll.uid ? 'fx-drop-target ' : '')
                 }
                 onClick={() => setSelectedUid(ll.uid)}>
                 <LayerThumb layer={ll} />
@@ -1264,6 +1349,7 @@ export default function App(){
                     <span className="type-icon">{typeBadge(ll)}</span>
                     {ll._follow && <span className="follow-badge" title="follows cursor">⊙</span>}
                     {ll.type === 'effect' && ll.mask?.on && <span className="mask-badge" title="masked">▣</span>}
+                    {ll.type === 'effect' && ll.scopedTo && <span className="scope-badge" title="scoped to layer">↳</span>}
                     {ll.blendMode && ll.blendMode !== 'normal' && <span className="blend-badge" title={`blend: ${ll.blendMode}`}>×</span>}
                   </span>
                   {renaming?.uid === ll.uid ? (
@@ -1312,6 +1398,15 @@ export default function App(){
               <span className={sel.type === 'effect' ? 'editing-name' : ''}>{layerLabel(sel)}</span>
               <span className="sub-tag">{sel.type === 'effect' ? selEffect.group : sel.type.toUpperCase()}</span>
             </div>
+            {sel.type === 'effect' && sel.scopedTo && (() => {
+              const parent = layers.find(p => p.uid === sel.scopedTo)
+              return (
+                <div className="scoped-note">
+                  ▸ scoped to <strong>{parent ? layerLabel(parent) : 'unknown'}</strong>
+                  <button className="mini-btn" onClick={() => unscopeEffect(sel.uid)}>unscope</button>
+                </div>
+              )
+            })()}
             <div className="params">
               {sel.type === 'effect' && (
                 <>

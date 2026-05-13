@@ -298,7 +298,7 @@ export function createEngine(canvas){
 
   const effectPrograms = new Map()
   let W = 0, H = 0
-  let fboA = null, fboB = null, fboC = null, fboD = null
+  let fboA = null, fboB = null, fboC = null, fboD = null, fboE = null
 
   function resize(w, h){
     W = w; H = h; canvas.width = w; canvas.height = h
@@ -306,7 +306,8 @@ export function createEngine(canvas){
     if(fboB){ gl.deleteFramebuffer(fboB.fbo); gl.deleteTexture(fboB.tex) }
     if(fboC){ gl.deleteFramebuffer(fboC.fbo); gl.deleteTexture(fboC.tex) }
     if(fboD){ gl.deleteFramebuffer(fboD.fbo); gl.deleteTexture(fboD.tex) }
-    fboA = makeFBO(gl, w, h); fboB = makeFBO(gl, w, h); fboC = makeFBO(gl, w, h); fboD = makeFBO(gl, w, h)
+    if(fboE){ gl.deleteFramebuffer(fboE.fbo); gl.deleteTexture(fboE.tex) }
+    fboA = makeFBO(gl, w, h); fboB = makeFBO(gl, w, h); fboC = makeFBO(gl, w, h); fboD = makeFBO(gl, w, h); fboE = makeFBO(gl, w, h)
   }
   function uploadTexture(image){
     const tex = gl.createTexture()
@@ -412,7 +413,8 @@ export function createEngine(canvas){
     gl.uniform1f(shapeU.u_opacity, s.opacity == null ? 1 : s.opacity)
     gl.uniform1f(shapeU.u_useTexture, useTex)
     const fitMap = { fill: 0, cover: 1, contain: 2, tile: 3 }
-    const fitMode = fitMap[s.imageFit] != null ? fitMap[s.imageFit] : 0
+    // Default to 'cover' so images are never stretched/distorted when no fit is set.
+    const fitMode = fitMap[s.imageFit] != null ? fitMap[s.imageFit] : 1
     const imgAR = (s.imgW && s.imgH) ? (s.imgW / s.imgH) : 1
     const shapeAR = bw / bh
     if(shapeU.u_imgAR)     gl.uniform1f(shapeU.u_imgAR, imgAR)
@@ -422,12 +424,79 @@ export function createEngine(canvas){
     gl.drawArrays(gl.TRIANGLE_FAN, 0, arr.length / 4)
   }
 
+  // Helper: run an effect pass with ping-pong on the given pair.
+  // Returns the new (read, write) tuple after the swap.
+  function runEffectPass(effect, time, mouse, read, write){
+    const entry = effectPrograms.get(effect.effectId)
+    if(!entry) return { read, write }
+    const useMask = effect.mask && effect.mask.on
+    if(useMask) blitFBO(read.tex, fboC, W, H)
+
+    gl.useProgram(entry.prog)
+    gl.bindVertexArray(fsVAO)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, write.fbo)
+    gl.viewport(0, 0, write.w, write.h)
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, read.tex)
+    if(entry.u.u_tex) gl.uniform1i(entry.u.u_tex, 0)
+    if(entry.u.u_res) gl.uniform2f(entry.u.u_res, write.w, write.h)
+    if(entry.u.u_mouse && mouse) gl.uniform2f(entry.u.u_mouse, mouse.x, mouse.y)
+    setUniforms(entry.u, { ...effect.values, u_time: time })
+    gl.drawArrays(gl.TRIANGLES, 0, 3)
+    let r = write, w = read
+
+    if(useMask){
+      gl.useProgram(maskProg)
+      gl.bindVertexArray(fsVAO)
+      gl.bindFramebuffer(gl.FRAMEBUFFER, w.fbo)
+      gl.viewport(0, 0, w.w, w.h)
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, fboC.tex)
+      if(maskU.u_originalTex) gl.uniform1i(maskU.u_originalTex, 0)
+      gl.activeTexture(gl.TEXTURE1)
+      gl.bindTexture(gl.TEXTURE_2D, r.tex)
+      if(maskU.u_effectedTex) gl.uniform1i(maskU.u_effectedTex, 1)
+      if(maskU.u_res) gl.uniform2f(maskU.u_res, w.w, w.h)
+      if(maskU.u_mouse && mouse) gl.uniform2f(maskU.u_mouse, mouse.x, mouse.y)
+      if(maskU.u_maskRadius) gl.uniform1f(maskU.u_maskRadius, effect.mask.radius || 0.3)
+      if(maskU.u_maskSoftness) gl.uniform1f(maskU.u_maskSoftness, effect.mask.softness || 0.3)
+      if(maskU.u_maskInvert) gl.uniform1f(maskU.u_maskInvert, effect.mask.invert ? 1 : 0)
+      if(maskU.u_maskFeather) gl.uniform1f(maskU.u_maskFeather, effect.mask.feather || 0.1)
+      gl.drawArrays(gl.TRIANGLES, 0, 3)
+      const t = r; r = w; w = t
+    }
+    return { read: r, write: w }
+  }
+
+  function drawLayerOntoBound(layer){
+    if((layer.type === 'image' || layer.type === 'text') && layer.tex){
+      gl.useProgram(spriteProg)
+      gl.bindVertexArray(spriteVAO)
+      gl.uniform2f(spriteU.u_canvasSize, W, H)
+      gl.uniform1i(spriteU.u_tex, 0)
+      drawSprite(layer)
+    } else if(layer.type === 'shape'){
+      gl.useProgram(shapeProg)
+      drawShape(layer)
+    }
+  }
+
   // ============ Unified render pipeline ============
   // layers: bottom-to-top. Each layer is either a sprite (image/text/shape)
-  // OR an effect. Effects affect the current accumulated framebuffer (everything
-  // rendered before them). Sprites render ON TOP of the current state.
+  // OR an effect. Global effects (no scopedTo) affect the current accumulated framebuffer.
+  // Scoped effects (effect.scopedTo === sprite.uid) apply ONLY to that sprite.
   function render({ layers, time, bg, mouse }){
     if(!fboA) return
+
+    // Group scoped effects by their target uid; skip them in the global pass.
+    const scopedByUid = new Map()
+    for(const l of layers){
+      if(l && l.type === 'effect' && l.visible && l.scopedTo){
+        const list = scopedByUid.get(l.scopedTo) || []
+        list.push(l)
+        scopedByUid.set(l.scopedTo, list)
+      }
+    }
 
     // Initialize: clear fboA with bg color
     let read = fboA, write = fboB
@@ -438,70 +507,25 @@ export function createEngine(canvas){
 
     for(const layer of layers){
       if(!layer || !layer.visible) continue
+      if(layer.type === 'effect' && layer.scopedTo) continue // handled with their parent
 
       if(layer.type === 'effect'){
-        const entry = effectPrograms.get(layer.effectId)
-        if(!entry) continue
-
-        // Optional mask: save current state to fboC
-        const useMask = layer.mask && layer.mask.on
-        if(useMask) blitFBO(read.tex, fboC, W, H)
-
-        // Run the effect: read → write
-        gl.useProgram(entry.prog)
-        gl.bindVertexArray(fsVAO)
-        gl.bindFramebuffer(gl.FRAMEBUFFER, write.fbo)
-        gl.viewport(0, 0, write.w, write.h)
-        gl.activeTexture(gl.TEXTURE0)
-        gl.bindTexture(gl.TEXTURE_2D, read.tex)
-        if(entry.u.u_tex)   gl.uniform1i(entry.u.u_tex, 0)
-        if(entry.u.u_res)   gl.uniform2f(entry.u.u_res, write.w, write.h)
-        if(entry.u.u_mouse && mouse) gl.uniform2f(entry.u.u_mouse, mouse.x, mouse.y)
-        setUniforms(entry.u, { ...layer.values, u_time: time })
-        gl.drawArrays(gl.TRIANGLES, 0, 3)
-        let t = read; read = write; write = t
-
-        // Apply mask blend: orig (fboC) + effected (read) → write
-        if(useMask){
-          gl.useProgram(maskProg)
-          gl.bindVertexArray(fsVAO)
-          gl.bindFramebuffer(gl.FRAMEBUFFER, write.fbo)
-          gl.viewport(0, 0, write.w, write.h)
-          gl.activeTexture(gl.TEXTURE0)
-          gl.bindTexture(gl.TEXTURE_2D, fboC.tex)
-          if(maskU.u_originalTex) gl.uniform1i(maskU.u_originalTex, 0)
-          gl.activeTexture(gl.TEXTURE1)
-          gl.bindTexture(gl.TEXTURE_2D, read.tex)
-          if(maskU.u_effectedTex) gl.uniform1i(maskU.u_effectedTex, 1)
-          if(maskU.u_res)         gl.uniform2f(maskU.u_res, write.w, write.h)
-          if(maskU.u_mouse && mouse) gl.uniform2f(maskU.u_mouse, mouse.x, mouse.y)
-          if(maskU.u_maskRadius)   gl.uniform1f(maskU.u_maskRadius, layer.mask.radius || 0.3)
-          if(maskU.u_maskSoftness) gl.uniform1f(maskU.u_maskSoftness, layer.mask.softness || 0.3)
-          if(maskU.u_maskInvert)   gl.uniform1f(maskU.u_maskInvert, layer.mask.invert ? 1 : 0)
-          if(maskU.u_maskFeather)  gl.uniform1f(maskU.u_maskFeather, layer.mask.feather || 0.1)
-          gl.drawArrays(gl.TRIANGLES, 0, 3)
-          t = read; read = write; write = t
-        }
+        // GLOBAL effect — applies to current accumulator
+        const pp = runEffectPass(layer, time, mouse, read, write)
+        read = pp.read; write = pp.write
       } else {
-        // Sprite/shape/text — render onto current `read`. Two paths:
-        //   normal blend: render directly with alpha blending
-        //   custom blend mode: render to fboD (scratch), then compositor pass
+        // Sprite/shape/text.
+        const scoped = scopedByUid.get(layer.uid) || []
         const blendMode = layer.blendMode || 'normal'
-        if(blendMode === 'normal'){
+        const needsScratch = scoped.length > 0 || blendMode !== 'normal'
+
+        if(!needsScratch){
+          // Fast path — alpha-blend directly into read
           gl.bindFramebuffer(gl.FRAMEBUFFER, read.fbo)
           gl.viewport(0, 0, W, H)
           gl.enable(gl.BLEND)
           gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
-          if((layer.type === 'image' || layer.type === 'text') && layer.tex){
-            gl.useProgram(spriteProg)
-            gl.bindVertexArray(spriteVAO)
-            gl.uniform2f(spriteU.u_canvasSize, W, H)
-            gl.uniform1i(spriteU.u_tex, 0)
-            drawSprite(layer)
-          } else if(layer.type === 'shape'){
-            gl.useProgram(shapeProg)
-            drawShape(layer)
-          }
+          drawLayerOntoBound(layer)
           gl.disable(gl.BLEND)
         } else {
           // Render layer alone to fboD (transparent bg)
@@ -511,18 +535,17 @@ export function createEngine(canvas){
           gl.clear(gl.COLOR_BUFFER_BIT)
           gl.enable(gl.BLEND)
           gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
-          if((layer.type === 'image' || layer.type === 'text') && layer.tex){
-            gl.useProgram(spriteProg)
-            gl.bindVertexArray(spriteVAO)
-            gl.uniform2f(spriteU.u_canvasSize, W, H)
-            gl.uniform1i(spriteU.u_tex, 0)
-            drawSprite(layer)
-          } else if(layer.type === 'shape'){
-            gl.useProgram(shapeProg)
-            drawShape(layer)
-          }
+          drawLayerOntoBound(layer)
           gl.disable(gl.BLEND)
-          // Compositor: dst = read, src = fboD → write
+
+          // Apply scoped effects by ping-pong on (fboD ↔ fboE)
+          let r = fboD, w = fboE
+          for(const fx of scoped){
+            const pp = runEffectPass(fx, time, mouse, r, w)
+            r = pp.read; w = pp.write
+          }
+
+          // Composite r onto read → write
           const blendMap = { normal:0, multiply:1, screen:2, overlay:3, softlight:4, darken:5, lighten:6, difference:7, exclusion:8, dodge:9, burn:10, add:11, subtract:12 }
           const modeNum = blendMap[blendMode] != null ? blendMap[blendMode] : 0
           gl.useProgram(compProg)
@@ -533,10 +556,10 @@ export function createEngine(canvas){
           gl.bindTexture(gl.TEXTURE_2D, read.tex)
           if(compU.u_dst) gl.uniform1i(compU.u_dst, 0)
           gl.activeTexture(gl.TEXTURE1)
-          gl.bindTexture(gl.TEXTURE_2D, fboD.tex)
+          gl.bindTexture(gl.TEXTURE_2D, r.tex)
           if(compU.u_src) gl.uniform1i(compU.u_src, 1)
           if(compU.u_blendMode) gl.uniform1f(compU.u_blendMode, modeNum)
-          if(compU.u_opacity) gl.uniform1f(compU.u_opacity, 1.0)  // sprite opacity already applied
+          if(compU.u_opacity) gl.uniform1f(compU.u_opacity, 1.0)
           gl.drawArrays(gl.TRIANGLES, 0, 3)
           const t = read; read = write; write = t
         }

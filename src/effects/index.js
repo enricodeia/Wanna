@@ -1655,11 +1655,134 @@ void main(){
   o = vec4(mix(base, texture(u_tex, uv).rgb, h * u_mix), 1.0);
 }`
 
+// ============ 3D MAPPING ============
+// Generates normal / depth / roughness from the image and relights it as a PBR-ish surface.
+// View modes let you inspect each generated map (normal / depth / roughness) directly.
+const MAPPING_3D = `${HEADER}
+uniform float u_view;          // 0=composite  1=normal  2=depth  3=roughness
+uniform float u_normalAmt;
+uniform float u_depthAmt;
+uniform float u_roughAmt;
+uniform float u_parallax;
+uniform float u_lightAngle;    // azimuth (deg)
+uniform float u_lightHeight;   // elevation (Z component)
+uniform float u_lightIntensity;
+uniform float u_ambient;
+uniform float u_specular;
+uniform float u_invert;        // invert final composite (or invert map preview)
+uniform float u_mix;
+uniform vec3  u_lightColor;
+uniform vec3  u_shadowColor;
+
+float lumaSample(vec2 uv){ return luma(texture(u_tex, uv).rgb); }
+
+float computeDepth(vec2 uv){
+  // depth derived from luminance — dark = recessed, bright = pushed forward
+  float l = lumaSample(uv);
+  return clamp(l * u_depthAmt, 0.0, 1.5);
+}
+
+vec3 computeNormal(vec2 uv, vec2 px){
+  // central difference sobel on a depth field (luma * depthAmt) for stable normals
+  float l = lumaSample(uv - vec2(px.x, 0.0)) * u_depthAmt;
+  float r = lumaSample(uv + vec2(px.x, 0.0)) * u_depthAmt;
+  float u = lumaSample(uv - vec2(0.0, px.y)) * u_depthAmt;
+  float d = lumaSample(uv + vec2(0.0, px.y)) * u_depthAmt;
+  float strength = max(u_normalAmt * 8.0, 0.0001);
+  vec3 n = normalize(vec3((l - r) * strength, (u - d) * strength, 1.0));
+  return n;
+}
+
+float computeRoughness(vec2 uv, vec2 px){
+  // variance of luma in a small neighborhood — busy areas read rough, flat areas read smooth
+  float c0 = lumaSample(uv);
+  float v = 0.0;
+  for(int x = -1; x <= 1; x++){
+    for(int y = -1; y <= 1; y++){
+      if(x == 0 && y == 0) continue;
+      float l = lumaSample(uv + vec2(float(x), float(y)) * px);
+      v += (l - c0) * (l - c0);
+    }
+  }
+  return clamp(sqrt(v / 8.0) * u_roughAmt * 6.0, 0.0, 1.0);
+}
+
+void main(){
+  vec2 px = 1.0 / u_res;
+  vec3 baseCol = texture(u_tex, v_uv).rgb;
+
+  vec3 N    = computeNormal(v_uv, px);
+  float dep = computeDepth(v_uv);
+  float rgh = computeRoughness(v_uv, px);
+
+  // Light direction from azimuth + elevation
+  float az = radians(u_lightAngle);
+  vec3 L = normalize(vec3(cos(az), sin(az), max(u_lightHeight, 0.05)));
+
+  // Parallax: shift sample uv along view direction by depth amount
+  vec2 viewDir = vec2(L.x, L.y);
+  vec2 puv = v_uv - viewDir * dep * u_parallax * 0.05;
+  vec3 col = texture(u_tex, clamp(puv, 0.0, 1.0)).rgb;
+
+  // Lambert diffuse
+  float diff = max(dot(N, L), 0.0);
+  // Blinn-Phong specular, attenuated by roughness
+  vec3 V = vec3(0.0, 0.0, 1.0);
+  vec3 H = normalize(L + V);
+  float specPow = mix(96.0, 4.0, clamp(rgh, 0.0, 1.0));
+  float spec = pow(max(dot(N, H), 0.0), specPow) * (1.0 - rgh * 0.6);
+
+  vec3 lit = col * (u_ambient + diff * u_lightIntensity * (1.0 - u_ambient));
+  // shadow tint where the surface faces away
+  float shade = 1.0 - clamp(diff, 0.0, 1.0);
+  lit = mix(lit, lit * u_shadowColor, shade * 0.4);
+  // specular highlight
+  lit += u_lightColor * spec * u_specular * u_lightIntensity;
+
+  vec3 outCol;
+  int view = int(u_view + 0.5);
+  if(view == 1){
+    // Normal map preview — standard tangent-space color encoding (R=x, G=y, B=z)
+    outCol = N * 0.5 + 0.5;
+  } else if(view == 2){
+    // Depth preview — grayscale
+    outCol = vec3(clamp(dep / max(u_depthAmt, 0.0001), 0.0, 1.0));
+  } else if(view == 3){
+    // Roughness preview — grayscale
+    outCol = vec3(rgh);
+  } else {
+    outCol = lit;
+  }
+
+  if(u_invert > 0.5) outCol = 1.0 - outCol;
+
+  o = vec4(mix(baseCol, outCol, u_mix), 1.0);
+}`
+
 // ============ helpers ============
 const c = (r,g,b)=>[r,g,b]
 const BLACK = c(0,0,0), WHITE = c(1,1,1)
 
 export const EFFECTS = {
+  // 3D MAPPING — own category, its own rules
+  mapping3d: { id:'mapping3d', label:'3D MAPPING', group:'3D MAPPING', fs: MAPPING_3D, params: [
+    { key:'u_view',           label:'view',           type:'select',
+      options:[['composite',0],['normal map',1],['depth map',2],['roughness map',3]], default:0 },
+    { key:'u_normalAmt',      label:'normal intensity',    type:'range', min:0, max:5, step:0.01, default:1 },
+    { key:'u_depthAmt',       label:'depth intensity',     type:'range', min:0, max:3, step:0.01, default:1 },
+    { key:'u_roughAmt',       label:'roughness intensity', type:'range', min:0, max:3, step:0.01, default:1 },
+    { key:'u_parallax',       label:'parallax',            type:'range', min:-2, max:2, step:0.001, default:0.5 },
+    { key:'u_lightAngle',     label:'light angle',         type:'range', min:0, max:360, step:1, default:135 },
+    { key:'u_lightHeight',    label:'light elevation',     type:'range', min:0.05, max:3, step:0.01, default:0.9 },
+    { key:'u_lightIntensity', label:'light intensity',     type:'range', min:0, max:3, step:0.01, default:1.2 },
+    { key:'u_ambient',        label:'ambient',             type:'range', min:0, max:1, step:0.01, default:0.4 },
+    { key:'u_specular',       label:'specular',            type:'range', min:0, max:3, step:0.01, default:0.8 },
+    { key:'u_lightColor',     label:'light color',         type:'color', default: c(1, 0.96, 0.88) },
+    { key:'u_shadowColor',    label:'shadow tint',         type:'color', default: c(0.45, 0.5, 0.7) },
+    { key:'u_invert',         label:'invert colors',       type:'toggle', default:false },
+    { key:'u_mix',            label:'mix',                 type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+
   // INTERACT — cursor-driven effects
   immersive: { id:'immersive', label:'IMMERSIVE (3D PUNCH)', group:'INTERACT', fs: IMMERSIVE, params: [
     { key:'u_radius',         label:'radius',        type:'range', min:0.05, max:1.5, step:0.001, default:0.35 },
