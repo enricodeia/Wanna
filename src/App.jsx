@@ -1210,15 +1210,19 @@ export default function App(){
             {(!collapsedCats.has(grp) || search) && (
               <div className="cat-list">
                 {grouped[grp].map((e) => (
-                  <button key={e.id} className="cat-item"
-                    draggable
+                  <div key={e.id} className="cat-item"
+                    role="button"
+                    tabIndex={0}
+                    draggable="true"
                     onDragStart={(ev) => onEffectDragStart(ev, e.id)}
                     onDragEnd={onEffectDragEnd}
                     onClick={() => addEffect(e.id)}
+                    onKeyDown={(ev) => { if(ev.key === 'Enter' || ev.key === ' ') addEffect(e.id) }}
                     title="click to add globally · drag onto a layer to scope it">
+                    <span className="cat-item-grip" aria-hidden>⋮⋮</span>
                     <span className="cat-item-label">{e.label}</span>
                     <span className="add">+</span>
-                  </button>
+                  </div>
                 ))}
               </div>
             )}

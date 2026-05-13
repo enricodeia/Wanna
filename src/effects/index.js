@@ -1759,6 +1759,500 @@ void main(){
   o = vec4(mix(baseCol, outCol, u_mix), 1.0);
 }`
 
+// ============ BATCH 3 — many more effects ============
+
+const HUE_ROTATE = `${HEADER}
+uniform float u_amount, u_mix;
+vec3 rgb2hsv(vec3 c){
+  vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
+  vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+  vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+  float d = q.x - min(q.w, q.y);
+  float e = 1e-10;
+  return vec3(abs(q.z + (q.w - q.y) / (6.0*d + e)), d / (q.x + e), q.x);
+}
+vec3 hsv2rgb(vec3 c){
+  vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+  vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+  return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  vec3 hsv = rgb2hsv(col);
+  hsv.x = fract(hsv.x + u_amount);
+  vec3 res = hsv2rgb(hsv);
+  o = vec4(mix(col, res, u_mix), 1.0);
+}`
+
+const SATURATE_NEW = `${HEADER}
+uniform float u_amount, u_mix;
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  float l = luma(col);
+  vec3 res = mix(vec3(l), col, u_amount);
+  o = vec4(mix(col, res, u_mix), 1.0);
+}`
+
+const TEMPERATURE = `${HEADER}
+uniform float u_temp, u_mix;
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  vec3 warm = vec3(1.15, 1.02, 0.82);
+  vec3 cool = vec3(0.82, 0.96, 1.18);
+  vec3 mult = mix(cool, warm, clamp(u_temp * 0.5 + 0.5, 0.0, 1.0));
+  vec3 res = col * mult;
+  o = vec4(mix(col, res, u_mix), 1.0);
+}`
+
+const SEPIA_NEW = `${HEADER}
+uniform float u_amount, u_mix;
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  vec3 sep = vec3(
+    dot(col, vec3(0.393, 0.769, 0.189)),
+    dot(col, vec3(0.349, 0.686, 0.168)),
+    dot(col, vec3(0.272, 0.534, 0.131))
+  );
+  vec3 res = mix(col, sep, u_amount);
+  o = vec4(mix(col, res, u_mix), 1.0);
+}`
+
+const POSTERIZE_NEW = `${HEADER}
+uniform float u_levels, u_mix;
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  float L = max(u_levels, 1.0);
+  vec3 res = floor(col * L) / L;
+  o = vec4(mix(col, res, u_mix), 1.0);
+}`
+
+const THRESHOLD_BW = `${HEADER}
+uniform float u_thresh, u_softness, u_mix;
+uniform vec3 u_dark, u_light;
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  float l = luma(col);
+  float t = smoothstep(u_thresh - u_softness, u_thresh + u_softness, l);
+  vec3 res = mix(u_dark, u_light, t);
+  o = vec4(mix(col, res, u_mix), 1.0);
+}`
+
+const MONO_GRAY = `${HEADER}
+uniform float u_amount, u_mix;
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  float l = luma(col);
+  vec3 res = mix(col, vec3(l), u_amount);
+  o = vec4(mix(col, res, u_mix), 1.0);
+}`
+
+const INVERT_RGB = `${HEADER}
+uniform float u_amount, u_mix;
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  vec3 res = mix(col, 1.0 - col, u_amount);
+  o = vec4(mix(col, res, u_mix), 1.0);
+}`
+
+const CONTRAST = `${HEADER}
+uniform float u_amount, u_pivot, u_mix;
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  vec3 res = (col - u_pivot) * u_amount + u_pivot;
+  o = vec4(mix(col, clamp(res, 0.0, 1.0), u_mix), 1.0);
+}`
+
+const GAMMA = `${HEADER}
+uniform float u_gamma, u_mix;
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  vec3 res = pow(max(col, 0.0), vec3(1.0 / max(u_gamma, 0.01)));
+  o = vec4(mix(col, res, u_mix), 1.0);
+}`
+
+// === LIGHT ===
+
+const GOD_RAYS = `${HEADER}
+uniform float u_x, u_y, u_intensity, u_decay, u_density, u_weight, u_mix;
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  vec2 srcPos = vec2(u_x, u_y);
+  vec2 d = (v_uv - srcPos);
+  vec3 acc = vec3(0.0);
+  float w = u_weight;
+  vec2 stepV = d * u_density / 32.0;
+  vec2 uv = v_uv;
+  for(int i = 0; i < 32; i++){
+    uv -= stepV;
+    vec3 s = texture(u_tex, clamp(uv, 0.0, 1.0)).rgb;
+    float l = luma(s);
+    acc += s * l * w;
+    w *= u_decay;
+  }
+  acc /= 32.0;
+  vec3 res = col + acc * u_intensity;
+  o = vec4(mix(col, res, u_mix), 1.0);
+}`
+
+const CHROMA_VIGN = `${HEADER}
+uniform float u_amount, u_radius, u_mix;
+void main(){
+  vec2 d = v_uv - 0.5;
+  float r = length(d) / 0.7;
+  float v = smoothstep(u_radius, 1.0, r);
+  vec3 col;
+  col.r = texture(u_tex, v_uv + d * v * u_amount).r;
+  col.g = texture(u_tex, v_uv).g;
+  col.b = texture(u_tex, v_uv - d * v * u_amount).b;
+  col *= 1.0 - v * 0.4;
+  vec3 base = texture(u_tex, v_uv).rgb;
+  o = vec4(mix(base, col, u_mix), 1.0);
+}`
+
+const HIGHLIGHTS_LIFT = `${HEADER}
+uniform float u_amount, u_pivot, u_mix;
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  vec3 res = col + max(col - u_pivot, 0.0) * u_amount;
+  o = vec4(mix(col, clamp(res, 0.0, 1.0), u_mix), 1.0);
+}`
+
+const SHADOWS_CRUSH = `${HEADER}
+uniform float u_amount, u_pivot, u_mix;
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  vec3 res = col - max(u_pivot - col, 0.0) * u_amount;
+  o = vec4(mix(col, max(res, 0.0), u_mix), 1.0);
+}`
+
+// === PATTERN ===
+
+const STRIPE_BARS = `${HEADER}
+uniform float u_freq, u_angle, u_thickness, u_blend, u_mix;
+uniform vec3 u_ink;
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  float a = radians(u_angle);
+  vec2 p = (v_uv - 0.5);
+  float t = p.x * cos(a) + p.y * sin(a);
+  float s = abs(fract(t * u_freq) - 0.5) * 2.0;
+  float k = step(u_thickness, s);
+  vec3 res = mix(u_ink, col, mix(1.0, 0.0, 1.0 - k) * u_blend + (1.0 - u_blend));
+  o = vec4(mix(col, mix(u_ink, col, k), u_mix), 1.0);
+}`
+
+const SPIRAL_OVERLAY = `${HEADER}
+uniform float u_turns, u_thickness, u_mix;
+uniform vec3 u_ink;
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  vec2 p = v_uv - 0.5;
+  float r = length(p);
+  float a = atan(p.y, p.x);
+  float s = fract(r * u_turns - a / TAU);
+  float k = step(u_thickness, abs(s - 0.5) * 2.0);
+  vec3 res = mix(u_ink, col, k);
+  o = vec4(mix(col, res, u_mix), 1.0);
+}`
+
+const VORONOI_EDGES = `${HEADER}
+uniform float u_scale, u_edge, u_mix;
+uniform vec3 u_ink;
+vec2 vhash2(vec2 p){
+  return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))) * 43758.5);
+}
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  vec2 p = v_uv * u_scale;
+  vec2 ip = floor(p);
+  vec2 fp = fract(p);
+  float md1 = 8.0, md2 = 8.0;
+  for(int y = -1; y <= 1; y++){
+    for(int x = -1; x <= 1; x++){
+      vec2 g = vec2(x, y);
+      vec2 r = g + vhash2(ip + g) - fp;
+      float dd = dot(r, r);
+      if(dd < md1){ md2 = md1; md1 = dd; }
+      else if(dd < md2) md2 = dd;
+    }
+  }
+  float edge = smoothstep(0.0, u_edge, sqrt(md2) - sqrt(md1));
+  vec3 res = mix(u_ink, col, edge);
+  o = vec4(mix(col, res, u_mix), 1.0);
+}`
+
+const NOISE_OVERLAY = `${HEADER}
+uniform float u_scale, u_amount, u_speed, u_mix;
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  float n = fbm(v_uv * u_scale + u_time * u_speed);
+  vec3 res = col + (n - 0.5) * u_amount;
+  o = vec4(mix(col, res, u_mix), 1.0);
+}`
+
+// === STYLIZE ===
+
+const RELIEF = `${HEADER}
+uniform float u_strength, u_angle, u_mix;
+void main(){
+  vec2 px = 1.0 / u_res;
+  float a = radians(u_angle);
+  vec2 off = vec2(cos(a), sin(a)) * px * u_strength * 6.0;
+  vec3 a1 = texture(u_tex, v_uv - off).rgb;
+  vec3 a2 = texture(u_tex, v_uv + off).rgb;
+  vec3 col = texture(u_tex, v_uv).rgb;
+  vec3 res = vec3(0.5) + (a2 - a1) * 2.0;
+  o = vec4(mix(col, res, u_mix), 1.0);
+}`
+
+const EDGE_OUTLINE = `${HEADER}
+uniform float u_strength, u_thresh, u_mix;
+uniform vec3 u_ink, u_paper;
+void main(){
+  vec2 px = 1.0 / u_res;
+  float gx = luma(texture(u_tex, v_uv + vec2(px.x, 0)).rgb) - luma(texture(u_tex, v_uv - vec2(px.x, 0)).rgb);
+  float gy = luma(texture(u_tex, v_uv + vec2(0, px.y)).rgb) - luma(texture(u_tex, v_uv - vec2(0, px.y)).rgb);
+  float g = length(vec2(gx, gy)) * u_strength * 4.0;
+  float k = smoothstep(u_thresh - 0.1, u_thresh + 0.1, g);
+  vec3 col = texture(u_tex, v_uv).rgb;
+  vec3 res = mix(u_paper, u_ink, k);
+  o = vec4(mix(col, res, u_mix), 1.0);
+}`
+
+const HATCH_LINES = `${HEADER}
+uniform float u_density, u_thickness, u_mix;
+uniform vec3 u_ink, u_paper;
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  float l = luma(col);
+  vec2 p = v_uv * u_density;
+  float h1 = step(u_thickness, abs(fract(p.x + p.y) - 0.5) * 2.0);
+  float h2 = step(u_thickness, abs(fract(p.x - p.y) - 0.5) * 2.0);
+  float h3 = step(u_thickness, abs(fract((p.x + p.y) * 2.0) - 0.5) * 2.0);
+  float h4 = step(u_thickness, abs(fract((p.x - p.y) * 2.0) - 0.5) * 2.0);
+  float ink = 1.0;
+  if(l < 0.8) ink *= h1;
+  if(l < 0.6) ink *= h2;
+  if(l < 0.4) ink *= h3;
+  if(l < 0.2) ink *= h4;
+  vec3 res = mix(u_ink, u_paper, ink);
+  o = vec4(mix(col, res, u_mix), 1.0);
+}`
+
+const WATERCOLOR = `${HEADER}
+uniform float u_radius, u_levels, u_bleed, u_mix;
+void main(){
+  vec2 px = 1.0 / u_res;
+  vec3 col = vec3(0.0);
+  float w = 0.0;
+  for(int x = -2; x <= 2; x++){
+    for(int y = -2; y <= 2; y++){
+      vec2 off = vec2(x, y) * px * u_radius;
+      vec3 s = texture(u_tex, v_uv + off).rgb;
+      float wt = exp(-float(x*x + y*y) * 0.3);
+      col += s * wt;
+      w += wt;
+    }
+  }
+  col /= w;
+  col = floor(col * u_levels) / max(u_levels, 1.0);
+  float n = fbm(v_uv * 8.0);
+  col += (n - 0.5) * u_bleed;
+  vec3 base = texture(u_tex, v_uv).rgb;
+  o = vec4(mix(base, col, u_mix), 1.0);
+}`
+
+// === GLITCH ===
+
+const BIT_CRUSH = `${HEADER}
+uniform float u_bits, u_mix;
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  float steps = pow(2.0, max(u_bits, 1.0));
+  vec3 res = floor(col * steps) / steps;
+  o = vec4(mix(col, res, u_mix), 1.0);
+}`
+
+const SYNC_SKEW = `${HEADER}
+uniform float u_amount, u_freq, u_speed, u_mix;
+void main(){
+  float skew = sin(v_uv.y * u_freq + u_time * u_speed) * u_amount;
+  vec2 uv = vec2(fract(v_uv.x + skew), v_uv.y);
+  vec3 col = texture(u_tex, uv).rgb;
+  vec3 base = texture(u_tex, v_uv).rgb;
+  o = vec4(mix(base, col, u_mix), 1.0);
+}`
+
+const COLOR_BAND = `${HEADER}
+uniform float u_bands, u_offset, u_mix;
+void main(){
+  float band = floor(v_uv.y * u_bands);
+  float h = hash(vec2(band, 1.0));
+  vec2 off = vec2((h - 0.5) * u_offset, 0.0);
+  vec3 col;
+  col.r = texture(u_tex, v_uv + off).r;
+  col.g = texture(u_tex, v_uv).g;
+  col.b = texture(u_tex, v_uv - off).b;
+  vec3 base = texture(u_tex, v_uv).rgb;
+  o = vec4(mix(base, col, u_mix), 1.0);
+}`
+
+// === DISTORT ===
+
+const PINCH_FX = `${HEADER}
+uniform float u_amount, u_radius, u_mix;
+void main(){
+  vec2 ar = u_res / max(u_res.x, u_res.y);
+  vec2 d = (v_uv - 0.5) * ar;
+  float r = length(d);
+  float fall = smoothstep(u_radius, 0.0, r);
+  vec2 dir = (r > 0.001) ? d / r : vec2(0.0);
+  vec2 uv = v_uv - dir * u_amount * fall / ar;
+  vec3 col = texture(u_tex, uv).rgb;
+  vec3 base = texture(u_tex, v_uv).rgb;
+  o = vec4(mix(base, col, u_mix), 1.0);
+}`
+
+const FISH_EYE_STRONG = `${HEADER}
+uniform float u_strength, u_mix;
+void main(){
+  vec2 p = v_uv - 0.5;
+  float r = length(p);
+  float theta = atan(p.y, p.x);
+  float rNew = pow(max(r, 0.0001), 1.0 + u_strength);
+  vec2 uv = vec2(cos(theta), sin(theta)) * rNew + 0.5;
+  vec3 col = texture(u_tex, clamp(uv, 0.0, 1.0)).rgb;
+  vec3 base = texture(u_tex, v_uv).rgb;
+  o = vec4(mix(base, col, u_mix), 1.0);
+}`
+
+const SPHERIZE = `${HEADER}
+uniform float u_amount, u_radius, u_mix;
+void main(){
+  vec2 ar = u_res / max(u_res.x, u_res.y);
+  vec2 d = (v_uv - 0.5) * ar;
+  float r = length(d);
+  float k = smoothstep(u_radius, 0.0, r);
+  vec2 dir = (r > 0.001) ? d / r : vec2(0.0);
+  vec2 uv = v_uv + dir * sin(k * 3.14159 * u_amount) * 0.15 / ar;
+  vec3 col = texture(u_tex, uv).rgb;
+  vec3 base = texture(u_tex, v_uv).rgb;
+  o = vec4(mix(base, col, u_mix), 1.0);
+}`
+
+const STRETCH_FX = `${HEADER}
+uniform float u_amountX, u_amountY, u_mix;
+void main(){
+  vec2 uv = (v_uv - 0.5) * vec2(1.0 - u_amountX, 1.0 - u_amountY) + 0.5;
+  vec3 col = texture(u_tex, clamp(uv, 0.0, 1.0)).rgb;
+  vec3 base = texture(u_tex, v_uv).rgb;
+  o = vec4(mix(base, col, u_mix), 1.0);
+}`
+
+// === FOCUS ===
+
+const TILT_SHIFT = `${HEADER}
+uniform float u_focus, u_width, u_blur, u_mix;
+void main(){
+  float d = abs(v_uv.y - u_focus);
+  float k = smoothstep(u_width * 0.5, u_width, d);
+  vec2 px = 1.0 / u_res * u_blur * k;
+  vec3 c = vec3(0.0);
+  for(int i = -3; i <= 3; i++){
+    c += texture(u_tex, v_uv + vec2(0.0, float(i)) * px).rgb;
+    c += texture(u_tex, v_uv + vec2(float(i), 0.0) * px).rgb;
+  }
+  c /= 14.0;
+  vec3 base = texture(u_tex, v_uv).rgb;
+  o = vec4(mix(base, c, u_mix), 1.0);
+}`
+
+const RADIAL_BLUR_FX = `${HEADER}
+uniform float u_x, u_y, u_strength, u_mix;
+void main(){
+  vec2 c = vec2(u_x, u_y);
+  vec2 dir = v_uv - c;
+  vec3 sum = vec3(0.0);
+  for(int i = 0; i < 16; i++){
+    float t = float(i) / 16.0;
+    vec2 uv = c + dir * (1.0 - t * u_strength);
+    sum += texture(u_tex, clamp(uv, 0.0, 1.0)).rgb;
+  }
+  vec3 res = sum / 16.0;
+  vec3 base = texture(u_tex, v_uv).rgb;
+  o = vec4(mix(base, res, u_mix), 1.0);
+}`
+
+const MOTION_BLUR_FX = `${HEADER}
+uniform float u_angle, u_distance, u_mix;
+void main(){
+  float a = radians(u_angle);
+  vec2 dir = vec2(cos(a), sin(a)) * u_distance / 16.0;
+  vec3 sum = vec3(0.0);
+  for(int i = -8; i <= 8; i++){
+    sum += texture(u_tex, v_uv + dir * float(i)).rgb;
+  }
+  sum /= 17.0;
+  vec3 base = texture(u_tex, v_uv).rgb;
+  o = vec4(mix(base, sum, u_mix), 1.0);
+}`
+
+// === INTERACT ===
+
+const CURSOR_MELT_FX = `${HEADER}
+uniform float u_radius, u_strength, u_mix;
+void main(){
+  vec2 ar = u_res / max(u_res.x, u_res.y);
+  vec2 d = (v_uv - u_mouse) * ar;
+  float r = length(d);
+  float k = smoothstep(u_radius, 0.0, r);
+  vec2 dir = (r > 0.001) ? d / r : vec2(0.0);
+  vec2 uv = v_uv - dir * k * u_strength / ar;
+  vec3 col = texture(u_tex, uv).rgb;
+  vec3 base = texture(u_tex, v_uv).rgb;
+  o = vec4(mix(base, col, u_mix), 1.0);
+}`
+
+const CURSOR_MAGNET_FX = `${HEADER}
+uniform float u_radius, u_strength, u_mix;
+void main(){
+  vec2 ar = u_res / max(u_res.x, u_res.y);
+  vec2 d = (v_uv - u_mouse) * ar;
+  float r = length(d);
+  float k = smoothstep(u_radius, 0.0, r);
+  vec2 dir = (r > 0.001) ? d / r : vec2(0.0);
+  vec2 uv = v_uv + dir * k * u_strength / ar;
+  vec3 col = texture(u_tex, uv).rgb;
+  vec3 base = texture(u_tex, v_uv).rgb;
+  o = vec4(mix(base, col, u_mix), 1.0);
+}`
+
+const CURSOR_WAVES_FX = `${HEADER}
+uniform float u_radius, u_freq, u_amp, u_speed, u_mix;
+void main(){
+  vec2 ar = u_res / max(u_res.x, u_res.y);
+  vec2 d = (v_uv - u_mouse) * ar;
+  float r = length(d);
+  float k = smoothstep(u_radius, 0.0, r);
+  vec2 uv = v_uv + d * sin(r * u_freq - u_time * u_speed) * u_amp * k / ar;
+  vec3 col = texture(u_tex, uv).rgb;
+  vec3 base = texture(u_tex, v_uv).rgb;
+  o = vec4(mix(base, col, u_mix), 1.0);
+}`
+
+const CURSOR_HEAT = `${HEADER}
+uniform float u_radius, u_intensity, u_mix;
+void main(){
+  vec3 col = texture(u_tex, v_uv).rgb;
+  vec2 ar = u_res / max(u_res.x, u_res.y);
+  vec2 d = (v_uv - u_mouse) * ar;
+  float r = length(d);
+  float k = smoothstep(u_radius, 0.0, r);
+  vec3 heat = vec3(1.0, 0.4, 0.05) * k * u_intensity;
+  vec3 res = col + heat;
+  o = vec4(mix(col, res, u_mix), 1.0);
+}`
+
 // ============ helpers ============
 const c = (r,g,b)=>[r,g,b]
 const BLACK = c(0,0,0), WHITE = c(1,1,1)
@@ -2501,6 +2995,207 @@ export const EFFECTS = {
     { key:'u_ior',      label:'ior',      type:'range', min:-3, max:3, step:0.01, default:1 },
     { key:'u_softness', label:'softness', type:'range', min:0.01, max:1, step:0.01, default:0.3 },
     { key:'u_mix',      label:'mix',      type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+
+  // === BATCH 3 — extra effects ===
+  hueRotate: { id:'hueRotate', label:'HUE ROTATE', group:'COLOR', fs: HUE_ROTATE, params: [
+    { key:'u_amount', label:'rotate', type:'range', min:-1, max:1, step:0.001, default:0.15 },
+    { key:'u_mix',    label:'mix',    type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  saturate: { id:'saturate', label:'SATURATE', group:'COLOR', fs: SATURATE_NEW, params: [
+    { key:'u_amount', label:'amount', type:'range', min:0, max:3, step:0.01, default:1.5 },
+    { key:'u_mix',    label:'mix',    type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  temperature: { id:'temperature', label:'TEMPERATURE', group:'COLOR', fs: TEMPERATURE, params: [
+    { key:'u_temp', label:'temp',  type:'range', min:-1, max:1, step:0.01, default:0.3 },
+    { key:'u_mix',  label:'mix',   type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  sepiaNew: { id:'sepiaNew', label:'SEPIA TONE', group:'COLOR', fs: SEPIA_NEW, params: [
+    { key:'u_amount', label:'amount', type:'range', min:0, max:1, step:0.01, default:0.85 },
+    { key:'u_mix',    label:'mix',    type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  posterizeNew: { id:'posterizeNew', label:'POSTERIZE+', group:'COLOR', fs: POSTERIZE_NEW, params: [
+    { key:'u_levels', label:'levels', type:'range', min:2, max:16, step:1, default:5 },
+    { key:'u_mix',    label:'mix',    type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  thresholdBW: { id:'thresholdBW', label:'THRESHOLD', group:'COLOR', fs: THRESHOLD_BW, params: [
+    { key:'u_thresh',   label:'threshold', type:'range', min:0, max:1, step:0.01, default:0.5 },
+    { key:'u_softness', label:'softness',  type:'range', min:0, max:0.5, step:0.001, default:0.05 },
+    { key:'u_dark',     label:'dark',      type:'color', default: BLACK },
+    { key:'u_light',    label:'light',     type:'color', default: WHITE },
+    { key:'u_mix',      label:'mix',       type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  monoGray: { id:'monoGray', label:'MONOCHROME', group:'COLOR', fs: MONO_GRAY, params: [
+    { key:'u_amount', label:'amount', type:'range', min:0, max:1, step:0.01, default:1 },
+    { key:'u_mix',    label:'mix',    type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  invertRgb: { id:'invertRgb', label:'INVERT', group:'COLOR', fs: INVERT_RGB, params: [
+    { key:'u_amount', label:'amount', type:'range', min:0, max:1, step:0.01, default:1 },
+    { key:'u_mix',    label:'mix',    type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  contrastFx: { id:'contrastFx', label:'CONTRAST', group:'COLOR', fs: CONTRAST, params: [
+    { key:'u_amount', label:'amount', type:'range', min:0, max:3, step:0.01, default:1.3 },
+    { key:'u_pivot',  label:'pivot',  type:'range', min:0, max:1, step:0.01, default:0.5 },
+    { key:'u_mix',    label:'mix',    type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  gammaFx: { id:'gammaFx', label:'GAMMA', group:'COLOR', fs: GAMMA, params: [
+    { key:'u_gamma', label:'gamma', type:'range', min:0.2, max:3, step:0.01, default:1.2 },
+    { key:'u_mix',   label:'mix',   type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+
+  godRays: { id:'godRays', label:'GOD RAYS', group:'LIGHT', fs: GOD_RAYS, followCursor:['u_x','u_y'], params: [
+    { key:'u_x',         label:'x',         type:'range', min:0, max:1, step:0.001, default:0.5 },
+    { key:'u_y',         label:'y',         type:'range', min:0, max:1, step:0.001, default:0.5 },
+    { key:'u_intensity', label:'intensity', type:'range', min:0, max:5, step:0.01, default:1.4 },
+    { key:'u_density',   label:'density',   type:'range', min:0.1, max:2, step:0.01, default:1 },
+    { key:'u_decay',     label:'decay',     type:'range', min:0.8, max:0.999, step:0.001, default:0.97 },
+    { key:'u_weight',    label:'weight',    type:'range', min:0, max:2, step:0.01, default:1 },
+    { key:'u_mix',       label:'mix',       type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  chromaVign: { id:'chromaVign', label:'CHROMATIC VIGNETTE', group:'LIGHT', fs: CHROMA_VIGN, params: [
+    { key:'u_amount', label:'shift',  type:'range', min:0, max:0.2, step:0.001, default:0.04 },
+    { key:'u_radius', label:'radius', type:'range', min:0, max:1, step:0.01, default:0.4 },
+    { key:'u_mix',    label:'mix',    type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  highlightsLift: { id:'highlightsLift', label:'HIGHLIGHTS', group:'LIGHT', fs: HIGHLIGHTS_LIFT, params: [
+    { key:'u_amount', label:'lift',  type:'range', min:0, max:2, step:0.01, default:0.5 },
+    { key:'u_pivot',  label:'pivot', type:'range', min:0, max:1, step:0.01, default:0.6 },
+    { key:'u_mix',    label:'mix',   type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  shadowsCrush: { id:'shadowsCrush', label:'SHADOWS', group:'LIGHT', fs: SHADOWS_CRUSH, params: [
+    { key:'u_amount', label:'crush', type:'range', min:0, max:2, step:0.01, default:0.5 },
+    { key:'u_pivot',  label:'pivot', type:'range', min:0, max:1, step:0.01, default:0.4 },
+    { key:'u_mix',    label:'mix',   type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+
+  stripeBars: { id:'stripeBars', label:'STRIPE BARS', group:'PATTERN', fs: STRIPE_BARS, params: [
+    { key:'u_freq',      label:'freq',      type:'range', min:2, max:80, step:0.5, default:18 },
+    { key:'u_angle',     label:'angle',     type:'range', min:0, max:180, step:1, default:45 },
+    { key:'u_thickness', label:'thickness', type:'range', min:0, max:1, step:0.01, default:0.5 },
+    { key:'u_blend',     label:'blend',     type:'range', min:0, max:1, step:0.01, default:0.7 },
+    { key:'u_ink',       label:'ink',       type:'color', default: BLACK },
+    { key:'u_mix',       label:'mix',       type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  spiralOverlay: { id:'spiralOverlay', label:'SPIRAL', group:'PATTERN', fs: SPIRAL_OVERLAY, params: [
+    { key:'u_turns',     label:'turns',     type:'range', min:1, max:40, step:0.5, default:8 },
+    { key:'u_thickness', label:'thickness', type:'range', min:0, max:1, step:0.01, default:0.5 },
+    { key:'u_ink',       label:'ink',       type:'color', default: BLACK },
+    { key:'u_mix',       label:'mix',       type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  voronoiEdges: { id:'voronoiEdges', label:'VORONOI EDGES', group:'PATTERN', fs: VORONOI_EDGES, params: [
+    { key:'u_scale', label:'scale', type:'range', min:2, max:80, step:1, default:20 },
+    { key:'u_edge',  label:'edge',  type:'range', min:0.01, max:0.5, step:0.001, default:0.1 },
+    { key:'u_ink',   label:'ink',   type:'color', default: BLACK },
+    { key:'u_mix',   label:'mix',   type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  noiseOverlay: { id:'noiseOverlay', label:'NOISE OVERLAY', group:'PATTERN', fs: NOISE_OVERLAY, params: [
+    { key:'u_scale',  label:'scale',  type:'range', min:0.5, max:30, step:0.1, default:4 },
+    { key:'u_amount', label:'amount', type:'range', min:0, max:1, step:0.01, default:0.3 },
+    { key:'u_speed',  label:'speed',  type:'range', min:0, max:3, step:0.01, default:0 },
+    { key:'u_mix',    label:'mix',    type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+
+  relief: { id:'relief', label:'RELIEF', group:'STYLIZE', fs: RELIEF, params: [
+    { key:'u_strength', label:'strength', type:'range', min:0, max:3, step:0.01, default:1 },
+    { key:'u_angle',    label:'angle',    type:'range', min:0, max:360, step:1, default:45 },
+    { key:'u_mix',      label:'mix',      type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  edgeOutline: { id:'edgeOutline', label:'EDGE OUTLINE', group:'STYLIZE', fs: EDGE_OUTLINE, params: [
+    { key:'u_strength', label:'strength', type:'range', min:0, max:6, step:0.01, default:2 },
+    { key:'u_thresh',   label:'threshold',type:'range', min:0, max:1, step:0.01, default:0.3 },
+    { key:'u_ink',      label:'ink',      type:'color', default: BLACK },
+    { key:'u_paper',    label:'paper',    type:'color', default: WHITE },
+    { key:'u_mix',      label:'mix',      type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  hatchLines: { id:'hatchLines', label:'HATCH LINES', group:'STYLIZE', fs: HATCH_LINES, params: [
+    { key:'u_density',   label:'density',   type:'range', min:8, max:120, step:1, default:40 },
+    { key:'u_thickness', label:'thickness', type:'range', min:0, max:1, step:0.01, default:0.55 },
+    { key:'u_ink',       label:'ink',       type:'color', default: BLACK },
+    { key:'u_paper',     label:'paper',     type:'color', default: WHITE },
+    { key:'u_mix',       label:'mix',       type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  watercolor: { id:'watercolor', label:'WATERCOLOR', group:'STYLIZE', fs: WATERCOLOR, params: [
+    { key:'u_radius', label:'radius', type:'range', min:0.5, max:6, step:0.1, default:2 },
+    { key:'u_levels', label:'levels', type:'range', min:2, max:12, step:1, default:6 },
+    { key:'u_bleed',  label:'bleed',  type:'range', min:0, max:0.5, step:0.01, default:0.1 },
+    { key:'u_mix',    label:'mix',    type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+
+  bitCrush: { id:'bitCrush', label:'BIT CRUSH', group:'GLITCH', fs: BIT_CRUSH, params: [
+    { key:'u_bits', label:'bits', type:'range', min:1, max:8, step:1, default:3 },
+    { key:'u_mix',  label:'mix',  type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  syncSkew: { id:'syncSkew', label:'SYNC SKEW', group:'GLITCH', fs: SYNC_SKEW, params: [
+    { key:'u_amount', label:'amount', type:'range', min:0, max:0.5, step:0.001, default:0.05 },
+    { key:'u_freq',   label:'freq',   type:'range', min:1, max:80, step:0.5, default:20 },
+    { key:'u_speed',  label:'speed',  type:'range', min:0, max:6, step:0.01, default:2 },
+    { key:'u_mix',    label:'mix',    type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  colorBand: { id:'colorBand', label:'COLOR BAND', group:'GLITCH', fs: COLOR_BAND, params: [
+    { key:'u_bands',  label:'bands',  type:'range', min:4, max:200, step:1, default:40 },
+    { key:'u_offset', label:'offset', type:'range', min:0, max:0.1, step:0.001, default:0.02 },
+    { key:'u_mix',    label:'mix',    type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+
+  pinchFx: { id:'pinchFx', label:'PINCH', group:'DISTORT', fs: PINCH_FX, params: [
+    { key:'u_amount', label:'amount', type:'range', min:-1, max:1, step:0.001, default:0.4 },
+    { key:'u_radius', label:'radius', type:'range', min:0.05, max:1, step:0.001, default:0.5 },
+    { key:'u_mix',    label:'mix',    type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  fishEyeStrong: { id:'fishEyeStrong', label:'FISH EYE STRONG', group:'DISTORT', fs: FISH_EYE_STRONG, params: [
+    { key:'u_strength', label:'strength', type:'range', min:-0.6, max:1.5, step:0.01, default:0.4 },
+    { key:'u_mix',      label:'mix',      type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  spherize: { id:'spherize', label:'SPHERIZE', group:'DISTORT', fs: SPHERIZE, params: [
+    { key:'u_amount', label:'amount', type:'range', min:-1, max:1, step:0.001, default:0.6 },
+    { key:'u_radius', label:'radius', type:'range', min:0.05, max:1, step:0.001, default:0.5 },
+    { key:'u_mix',    label:'mix',    type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  stretchFx: { id:'stretchFx', label:'STRETCH', group:'DISTORT', fs: STRETCH_FX, params: [
+    { key:'u_amountX', label:'stretch x', type:'range', min:-0.8, max:0.8, step:0.001, default:0 },
+    { key:'u_amountY', label:'stretch y', type:'range', min:-0.8, max:0.8, step:0.001, default:0.3 },
+    { key:'u_mix',     label:'mix',       type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+
+  tiltShift: { id:'tiltShift', label:'TILT SHIFT', group:'FOCUS', fs: TILT_SHIFT, params: [
+    { key:'u_focus', label:'focus y', type:'range', min:0, max:1, step:0.001, default:0.5 },
+    { key:'u_width', label:'width',   type:'range', min:0.02, max:0.5, step:0.001, default:0.15 },
+    { key:'u_blur',  label:'blur',    type:'range', min:0.5, max:30, step:0.1, default:8 },
+    { key:'u_mix',   label:'mix',     type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  radialBlurFx: { id:'radialBlurFx', label:'RADIAL BLUR', group:'FOCUS', fs: RADIAL_BLUR_FX, followCursor:['u_x','u_y'], params: [
+    { key:'u_x',        label:'x',        type:'range', min:0, max:1, step:0.001, default:0.5 },
+    { key:'u_y',        label:'y',        type:'range', min:0, max:1, step:0.001, default:0.5 },
+    { key:'u_strength', label:'strength', type:'range', min:0, max:1, step:0.001, default:0.4 },
+    { key:'u_mix',      label:'mix',      type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  motionBlurFx: { id:'motionBlurFx', label:'MOTION BLUR', group:'FOCUS', fs: MOTION_BLUR_FX, params: [
+    { key:'u_angle',    label:'angle',    type:'range', min:0, max:360, step:1, default:0 },
+    { key:'u_distance', label:'distance', type:'range', min:0, max:0.2, step:0.001, default:0.04 },
+    { key:'u_mix',      label:'mix',      type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+
+  cursorMelt: { id:'cursorMelt', label:'CURSOR MELT', group:'INTERACT', fs: CURSOR_MELT_FX, params: [
+    { key:'u_radius',   label:'radius',   type:'range', min:0.05, max:1.5, step:0.001, default:0.3 },
+    { key:'u_strength', label:'strength', type:'range', min:0, max:1, step:0.001, default:0.25 },
+    { key:'u_mix',      label:'mix',      type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  cursorMagnet: { id:'cursorMagnet', label:'CURSOR MAGNET', group:'INTERACT', fs: CURSOR_MAGNET_FX, params: [
+    { key:'u_radius',   label:'radius',   type:'range', min:0.05, max:1.5, step:0.001, default:0.3 },
+    { key:'u_strength', label:'strength', type:'range', min:0, max:1, step:0.001, default:0.25 },
+    { key:'u_mix',      label:'mix',      type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  cursorWaves: { id:'cursorWaves', label:'CURSOR WAVES', group:'INTERACT', fs: CURSOR_WAVES_FX, params: [
+    { key:'u_radius', label:'radius', type:'range', min:0.05, max:1.5, step:0.001, default:0.4 },
+    { key:'u_freq',   label:'freq',   type:'range', min:1, max:60, step:0.1, default:18 },
+    { key:'u_amp',    label:'amp',    type:'range', min:0, max:0.2, step:0.001, default:0.04 },
+    { key:'u_speed',  label:'speed',  type:'range', min:0, max:8, step:0.01, default:3 },
+    { key:'u_mix',    label:'mix',    type:'range', min:0, max:1, step:0.01, default:1 }
+  ]},
+  cursorHeat: { id:'cursorHeat', label:'CURSOR HEAT', group:'INTERACT', fs: CURSOR_HEAT, params: [
+    { key:'u_radius',    label:'radius',    type:'range', min:0.05, max:1.5, step:0.001, default:0.35 },
+    { key:'u_intensity', label:'intensity', type:'range', min:0, max:3, step:0.01, default:1 },
+    { key:'u_mix',       label:'mix',       type:'range', min:0, max:1, step:0.01, default:1 }
   ]}
 }
 

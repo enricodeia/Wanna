@@ -624,12 +624,12 @@ button{ background: none; border: 0; cursor: pointer; padding: 0; color: inherit
   line-height: 1;
 }
 
-/* Primitives panel */
+/* Primitives panel — 3-col grid, multi-row */
 .primitive-grid{
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 6px;
-  padding: 10px;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding: 12px;
   background: var(--paper);
   border-bottom: 1px solid var(--line);
 }
@@ -638,20 +638,20 @@ button{ background: none; border: 0; cursor: pointer; padding: 0; color: inherit
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  padding: 14px 4px 10px;
+  gap: 8px;
+  padding: 18px 6px 12px;
   border: 1.5px solid var(--ink);
   background: var(--paper);
   cursor: pointer;
-  border-radius: 5px;
+  border-radius: 6px;
   font-family: var(--mono);
-  min-height: 64px;
-  transition: transform 0.06s ease;
+  min-height: 78px;
+  transition: transform 0.06s ease, background 0.08s ease;
 }
 .primitive-btn:hover{ background: var(--ink); color: var(--paper); border-color: var(--ink); transform: translateY(-1px); }
 .primitive-btn:active{ transform: translateY(0); }
-.primitive-icon{ font-size: 30px; line-height: 1; font-weight: 600; }
-.primitive-name{ font-size: 9px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; opacity: 0.8; }
+.primitive-icon{ font-size: 36px; line-height: 1; font-weight: 600; }
+.primitive-name{ font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; opacity: 0.85; }
 
 /* Layer rename input */
 .layer-rename-input{
@@ -1114,8 +1114,23 @@ button{ background: none; border: 0; cursor: pointer; padding: 0; color: inherit
 .scoped-note .mini-btn{ margin-left: auto; }
 
 /* Library item — draggable affordance */
-.cat-item[draggable="true"]{ cursor: grab; }
+.cat-item[draggable="true"]{
+  cursor: grab;
+  -webkit-user-drag: element;
+  user-drag: element;
+  user-select: none;
+  -webkit-user-select: none;
+}
 .cat-item[draggable="true"]:active{ cursor: grabbing; }
+.cat-item-grip{
+  font-size: 10px;
+  color: var(--mute);
+  letter-spacing: -2px;
+  width: 12px;
+  flex-shrink: 0;
+  opacity: 0.5;
+}
+.cat-item:hover .cat-item-grip{ color: var(--paper); opacity: 1; }
 
 /* Drop highlight when dragging an effect onto a layer card */
 .layer.fx-drop-target{
