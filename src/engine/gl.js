@@ -140,7 +140,9 @@ void main(){
   o = vec4(result, max(dst.a, a));
 }`
 
-// Mask blend: interpolates between original and effected based on a soft circular cursor mask.
+// Mask blend: interpolates between original and effected based on a soft cursor mask.
+// The mask boundary can be warped by procedural shaders (fbm / ripple / spikes / cells /
+// zigzag) so the "circle" becomes an organic blob, spiked star, wavy edge, etc.
 const MASK_BLEND_FS = `#version 300 es
 precision highp float;
 in vec2 v_uv;
@@ -148,20 +150,101 @@ uniform sampler2D u_originalTex;
 uniform sampler2D u_effectedTex;
 uniform vec2 u_res;
 uniform vec2 u_mouse;
+uniform float u_time;
 uniform float u_maskRadius;
 uniform float u_maskSoftness;
 uniform float u_maskInvert;
 uniform float u_maskFeather;
+uniform int   u_warpType;     // 0=none 1=fbm 2=ripple 3=spikes 4=cells 5=zigzag
+uniform float u_warpAmount;
+uniform float u_warpScale;
+uniform float u_warpSpeed;
 out vec4 o;
+
+float mhash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float mnoise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f*f*(3.0-2.0*f);
+  return mix(mix(mhash(i), mhash(i+vec2(1,0)), u.x),
+             mix(mhash(i+vec2(0,1)), mhash(i+vec2(1,1)), u.x), u.y);
+}
+float mfbm(vec2 p){
+  float v = 0.0, a = 0.5;
+  for(int i = 0; i < 5; i++){ v += a * mnoise(p); p *= 2.0; a *= 0.5; }
+  return v;
+}
+
+float maskWarp(vec2 d, float angle){
+  if(u_warpType == 0) return 0.0;
+  float r = u_maskRadius;
+  if(u_warpType == 1){
+    // FBM organic blob — radial offset modulated by noise around the boundary
+    float n = mfbm(d * u_warpScale * 4.0 + vec2(u_time * u_warpSpeed * 0.4));
+    return (n - 0.5) * u_warpAmount * r;
+  } else if(u_warpType == 2){
+    // Ripple — sinusoidal angular wave
+    return sin(angle * u_warpScale + u_time * u_warpSpeed * 2.0) * u_warpAmount * r * 0.4;
+  } else if(u_warpType == 3){
+    // Spikes — triangle wave around angle = sharp peaks
+    float t = fract(angle * u_warpScale / 6.28318 + u_time * u_warpSpeed * 0.1);
+    return (abs(t - 0.5) * 2.0 - 0.5) * u_warpAmount * r * 0.8;
+  } else if(u_warpType == 4){
+    // Cellular — voronoi-ish chunky boundary
+    vec2 g = floor(d * u_warpScale * 6.0);
+    float n = mhash(g + floor(u_time * u_warpSpeed * 2.0));
+    return (n - 0.5) * u_warpAmount * r * 0.7;
+  } else if(u_warpType == 5){
+    // Zigzag — sharp triangle wave on radius
+    float t = fract(angle * u_warpScale / 3.14159 + u_time * u_warpSpeed * 0.5);
+    return (abs(t - 0.5) * 4.0 - 1.0) * u_warpAmount * r * 0.5;
+  }
+  return 0.0;
+}
+
 void main(){
   vec4 orig = texture(u_originalTex, v_uv);
   vec4 effected = texture(u_effectedTex, v_uv);
   vec2 ar = u_res / max(u_res.x, u_res.y);
-  float d = length((v_uv - u_mouse) * ar);
+  vec2 d = (v_uv - u_mouse) * ar;
+  float dist = length(d);
+  float angle = atan(d.y, d.x);
+  float warp = maskWarp(d, angle);
+  float effectiveDist = dist + warp;
   float inner = u_maskRadius * (1.0 - u_maskSoftness);
-  float maskValue = 1.0 - smoothstep(inner, u_maskRadius * (1.0 + u_maskFeather), d);
+  float maskValue = 1.0 - smoothstep(inner, u_maskRadius * (1.0 + u_maskFeather), effectiveDist);
   if(u_maskInvert > 0.5) maskValue = 1.0 - maskValue;
   o = mix(orig, effected, maskValue);
+}`
+
+// Background: fullscreen quad shader for solid / linear / radial / conic gradients.
+const BG_FS = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform int   u_bgType;     // 0=solid  1=linear  2=radial  3=conic
+uniform vec3  u_bgA;
+uniform vec3  u_bgB;
+uniform float u_bgAngle;    // for linear / conic
+uniform float u_bgRadius;   // for radial
+out vec4 o;
+void main(){
+  vec3 col;
+  if(u_bgType == 1){
+    float a = radians(u_bgAngle);
+    vec2 dir = vec2(cos(a), sin(a));
+    float t = clamp(dot(v_uv - 0.5, dir) + 0.5, 0.0, 1.0);
+    col = mix(u_bgA, u_bgB, t);
+  } else if(u_bgType == 2){
+    float t = clamp(length(v_uv - 0.5) / max(u_bgRadius, 0.01), 0.0, 1.0);
+    col = mix(u_bgA, u_bgB, t);
+  } else if(u_bgType == 3){
+    vec2 p = v_uv - 0.5;
+    float a = atan(p.y, p.x) - radians(u_bgAngle);
+    float t = fract(a / 6.28318 + 0.5);
+    col = mix(u_bgA, u_bgB, t);
+  } else {
+    col = u_bgA;
+  }
+  o = vec4(col, 1.0);
 }`
 
 function compile(gl, type, src){
@@ -295,6 +378,8 @@ export function createEngine(canvas){
   const maskU = uniforms(gl, maskProg)
   const compProg = linkProgram(gl, FULLSCREEN_VS, COMPOSITOR_FS, ['a_pos'])
   const compU = uniforms(gl, compProg)
+  const bgProg = linkProgram(gl, FULLSCREEN_VS, BG_FS, ['a_pos'])
+  const bgU = uniforms(gl, bgProg)
 
   const effectPrograms = new Map()
   let W = 0, H = 0
@@ -470,10 +555,15 @@ export function createEngine(canvas){
       if(maskU.u_effectedTex) gl.uniform1i(maskU.u_effectedTex, 1)
       if(maskU.u_res) gl.uniform2f(maskU.u_res, w.w, w.h)
       if(maskU.u_mouse && mouse) gl.uniform2f(maskU.u_mouse, mouse.x, mouse.y)
+      if(maskU.u_time) gl.uniform1f(maskU.u_time, time)
       if(maskU.u_maskRadius) gl.uniform1f(maskU.u_maskRadius, effect.mask.radius || 0.3)
       if(maskU.u_maskSoftness) gl.uniform1f(maskU.u_maskSoftness, effect.mask.softness || 0.3)
       if(maskU.u_maskInvert) gl.uniform1f(maskU.u_maskInvert, effect.mask.invert ? 1 : 0)
       if(maskU.u_maskFeather) gl.uniform1f(maskU.u_maskFeather, effect.mask.feather || 0.1)
+      if(maskU.u_warpType) gl.uniform1i(maskU.u_warpType, effect.mask.warpType | 0)
+      if(maskU.u_warpAmount) gl.uniform1f(maskU.u_warpAmount, effect.mask.warpAmount || 0)
+      if(maskU.u_warpScale) gl.uniform1f(maskU.u_warpScale, effect.mask.warpScale || 4)
+      if(maskU.u_warpSpeed) gl.uniform1f(maskU.u_warpSpeed, effect.mask.warpSpeed || 0.5)
       gl.drawArrays(gl.TRIANGLES, 0, 3)
       const t = r; r = w; w = t
     }
@@ -510,12 +600,37 @@ export function createEngine(canvas){
       }
     }
 
-    // Initialize: clear fboA with bg color
+    // Initialize: clear fboA with the background — supports legacy [r,g,b] arrays
+    // and the new { type, color, colorA, colorB, angle, radius } object.
     let read = fboA, write = fboB
     gl.bindFramebuffer(gl.FRAMEBUFFER, read.fbo)
     gl.viewport(0, 0, W, H)
-    gl.clearColor(bg[0], bg[1], bg[2], 1.0)
-    gl.clear(gl.COLOR_BUFFER_BIT)
+    if(Array.isArray(bg)){
+      gl.clearColor(bg[0], bg[1], bg[2], 1.0)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+    } else if(!bg || bg.type === 'transparent'){
+      gl.clearColor(0, 0, 0, 0)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+    } else if(bg.type === 'solid' || !bg.type){
+      const c = bg.color || [0, 0, 0]
+      gl.clearColor(c[0], c[1], c[2], 1.0)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+    } else {
+      // Gradient: linear / radial / conic — render via BG_FS
+      gl.clearColor(0, 0, 0, 1)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+      gl.useProgram(bgProg)
+      gl.bindVertexArray(fsVAO)
+      const typeMap = { solid: 0, linear: 1, radial: 2, conic: 3 }
+      const A = bg.colorA || bg.color || [0, 0, 0]
+      const B = bg.colorB || [1, 1, 1]
+      if(bgU.u_bgType) gl.uniform1i(bgU.u_bgType, typeMap[bg.type] || 0)
+      if(bgU.u_bgA) gl.uniform3f(bgU.u_bgA, A[0], A[1], A[2])
+      if(bgU.u_bgB) gl.uniform3f(bgU.u_bgB, B[0], B[1], B[2])
+      if(bgU.u_bgAngle) gl.uniform1f(bgU.u_bgAngle, bg.angle != null ? bg.angle : 90)
+      if(bgU.u_bgRadius) gl.uniform1f(bgU.u_bgRadius, bg.radius != null ? bg.radius : 0.7)
+      gl.drawArrays(gl.TRIANGLES, 0, 3)
+    }
 
     for(const layer of layers){
       if(!layer || !layer.visible) continue

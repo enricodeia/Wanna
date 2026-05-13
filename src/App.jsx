@@ -31,7 +31,29 @@ const SAMPLES = [
 const REC_OPTIONS = [5, 10, 15, 30]
 const DEFAULT_TRANSFORM = { x: 0.5, y: 0.5, scale: 1, rotation: 0, opacity: 1 }
 const DEFAULT_FOLLOW = { momentum: 0.18, intensityX: 1.0, intensityY: 1.0 }
-const DEFAULT_MASK = { on: false, radius: 0.3, softness: 0.3, feather: 0.15, invert: false }
+const DEFAULT_MASK = {
+  on: false, radius: 0.3, softness: 0.3, feather: 0.15, invert: false,
+  warpType: 0, warpAmount: 0, warpScale: 4, warpSpeed: 0.5
+}
+const MASK_WARP_OPTIONS = [
+  ['circle', 0], ['organic (fbm)', 1], ['ripple', 2],
+  ['spikes', 3], ['cells', 4], ['zigzag', 5]
+]
+const DEFAULT_BG = {
+  type: 'solid',
+  color: [0, 0, 0],
+  colorA: [0, 0, 0],
+  colorB: [1, 1, 1],
+  angle: 90,
+  radius: 0.7
+}
+const BG_TYPES = [
+  ['solid', 'solid'],
+  ['transparent', 'transparent'],
+  ['linear', 'linear'],
+  ['radial', 'radial'],
+  ['conic', 'conic']
+]
 const BLEND_MODES = [
   ['normal', 0], ['multiply', 1], ['screen', 2], ['overlay', 3], ['soft light', 4],
   ['darken', 5], ['lighten', 6], ['difference', 7], ['exclusion', 8],
@@ -40,12 +62,24 @@ const BLEND_MODES = [
 const BLEND_MAP = ['normal','multiply','screen','overlay','softlight','darken','lighten','difference','exclusion','dodge','burn','add','subtract']
 
 // ============ Shape primitive generators ============
+// All primitive icons share the same 24x24 viewbox + 1.6px line stroke + no fill,
+// so the iconography is visually consistent across the whole grid.
+const PRIM_STROKE = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinejoin: 'round' }
+const PRIM_ICONS = {
+  rect:     <rect x="3" y="6" width="18" height="12" {...PRIM_STROKE}/>,
+  circle:   <circle cx="12" cy="12" r="9" {...PRIM_STROKE}/>,
+  triangle: <polygon points="12,3 22,21 2,21" {...PRIM_STROKE}/>,
+  diamond:  <polygon points="12,2 22,12 12,22 2,12" {...PRIM_STROKE}/>,
+  hex:      <polygon points="12,2 21,7 21,17 12,22 3,17 3,7" {...PRIM_STROKE}/>,
+  star:     <polygon points="12,2 14.5,9 22,9 16,14 18,21 12,17 6,21 8,14 2,9 9.5,9" {...PRIM_STROKE}/>
+}
 const PRIMITIVES = [
-  { id: 'rect',     label: '+ RECT',     icon: '▭' },
-  { id: 'circle',   label: '+ CIRCLE',   icon: '○' },
-  { id: 'triangle', label: '+ TRIANGLE', icon: '△' },
-  { id: 'star',     label: '+ STAR',     icon: '☆' },
-  { id: 'hex',      label: '+ HEXAGON',  icon: '⬡' }
+  { id: 'rect',     label: 'rect' },
+  { id: 'circle',   label: 'circle' },
+  { id: 'triangle', label: 'triangle' },
+  { id: 'diamond',  label: 'diamond' },
+  { id: 'hex',      label: 'hexagon' },
+  { id: 'star',     label: 'star' }
 ]
 function generatePrimitive(kind, cx = 0.5, cy = 0.5, size = 0.18){
   const pts = []
@@ -62,6 +96,8 @@ function generatePrimitive(kind, cx = 0.5, cy = 0.5, size = 0.18){
     pts.push(cx, cy - size,
              cx + size * 0.866, cy + size * 0.5,
              cx - size * 0.866, cy + size * 0.5)
+  } else if(kind === 'diamond'){
+    pts.push(cx, cy - size, cx + size, cy, cx, cy + size, cx - size, cy)
   } else if(kind === 'star'){
     const N = 10
     for(let i = 0; i < N; i++){
@@ -173,7 +209,7 @@ export default function App(){
   const [err, setErr] = useState(null)
 
   const [aspect, setAspect] = useState('1:1')
-  const [bg] = useState([1, 1, 1])
+  const [bg, setBg] = useState({ ...DEFAULT_BG })
   const [search, setSearch] = useState('')
   const [tool, setTool] = useState('select')
   const [penColor, setPenColor] = useState([0.05, 0.05, 0.05])
@@ -1160,6 +1196,10 @@ export default function App(){
     e.target.value = ''
   }
 
+  // Background helpers
+  const setBgField = (key, value) => setBg(b => ({ ...b, [key]: value }))
+  const setBgType  = (type) => setBg(b => ({ ...b, type }))
+
   const FollowControls = ({ uid, cfg }) => {
     const c = cfg || DEFAULT_FOLLOW
     return (
@@ -1236,8 +1276,8 @@ export default function App(){
         <div className="primitive-grid">
           {PRIMITIVES.map(p => (
             <button key={p.id} className="primitive-btn" onClick={() => addPrimitive(p.id)} title={p.label}>
-              <span className="primitive-icon">{p.icon}</span>
-              <span className="primitive-name">{p.id}</span>
+              <svg className="primitive-svg" viewBox="0 0 24 24" width="36" height="36" aria-hidden>{PRIM_ICONS[p.id]}</svg>
+              <span className="primitive-name">{p.label}</span>
             </button>
           ))}
         </div>
@@ -1285,12 +1325,51 @@ export default function App(){
           </div>
         ))}
 
+        {/* === BACKGROUND === */}
+        <div className="section-bar bg-bar">
+          <span className="section-letter">B</span>
+          <span className="section-label">BACKGROUND</span>
+          <span className="section-count">{bg.type}</span>
+        </div>
+        <div className="bg-panel">
+          <div className="bg-type-row">
+            {BG_TYPES.map(([id, label]) => (
+              <button key={id}
+                className={'bg-type-btn ' + (bg.type === id ? 'on' : '')}
+                onClick={() => setBgType(id)}>{label}</button>
+            ))}
+          </div>
+          {bg.type === 'solid' && (
+            <ParamControl param={{ key:'color', label:'color', type:'color', default:[0,0,0] }}
+              value={bg.color} onChange={(v) => setBgField('color', v)} />
+          )}
+          {bg.type === 'transparent' && (
+            <div className="bg-transparent-note">no fill — exports as PNG with alpha</div>
+          )}
+          {(bg.type === 'linear' || bg.type === 'radial' || bg.type === 'conic') && (
+            <>
+              <ParamControl param={{ key:'colorA', label:'color A', type:'color', default:[0,0,0] }}
+                value={bg.colorA} onChange={(v) => setBgField('colorA', v)} />
+              <ParamControl param={{ key:'colorB', label:'color B', type:'color', default:[1,1,1] }}
+                value={bg.colorB} onChange={(v) => setBgField('colorB', v)} />
+              {(bg.type === 'linear' || bg.type === 'conic') && (
+                <ParamControl param={{ key:'angle', label:'angle', type:'range', min:0, max:360, step:1, default:90 }}
+                  value={bg.angle} onChange={(v) => setBgField('angle', v)} />
+              )}
+              {bg.type === 'radial' && (
+                <ParamControl param={{ key:'radius', label:'radius', type:'range', min:0.1, max:1.5, step:0.001, default:0.7 }}
+                  value={bg.radius} onChange={(v) => setBgField('radius', v)} />
+              )}
+            </>
+          )}
+        </div>
+
         <div className="hint">v select · p pen · t text · drop images</div>
       </div>
 
       {/* CENTER */}
       <div className="center">
-        <div className={'canvas-wrap tool-' + tool} style={aspectStyle}
+        <div className={'canvas-wrap tool-' + tool + (bg.type === 'transparent' ? ' bg-transparent' : '')} style={aspectStyle}
           onDragOver={onCanvasDragOver}
           onDrop={onCanvasDrop}>
           <div className="canvas-tag">{layers.length} layers · {activeEffects} fx{recording ? ` · REC ${recCountdown}s` : ''}</div>
@@ -1490,6 +1569,20 @@ export default function App(){
                           <span>invert mask</span>
                         </div>
                       </div>
+                      {/* Mask warp — apply a procedural distortion to the mask boundary */}
+                      <ParamControl param={{ key:'warpType', label:'mask shape', type:'select', options: MASK_WARP_OPTIONS, default: 0 }}
+                        value={sel.mask.warpType ?? 0}
+                        onChange={(v) => updateMask(sel.uid, 'warpType', v | 0)} />
+                      {(sel.mask.warpType ?? 0) > 0 && (
+                        <>
+                          <ParamControl param={{ key:'warpAmount', label:'warp amount', type:'range', min:0, max:2, step:0.001, default:0.5 }}
+                            value={sel.mask.warpAmount ?? 0.5} onChange={(v) => updateMask(sel.uid, 'warpAmount', v)} />
+                          <ParamControl param={{ key:'warpScale', label:'warp scale', type:'range', min:0.5, max:30, step:0.1, default:4 }}
+                            value={sel.mask.warpScale ?? 4} onChange={(v) => updateMask(sel.uid, 'warpScale', v)} />
+                          <ParamControl param={{ key:'warpSpeed', label:'warp speed', type:'range', min:0, max:5, step:0.01, default:0.5 }}
+                            value={sel.mask.warpSpeed ?? 0.5} onChange={(v) => updateMask(sel.uid, 'warpSpeed', v)} />
+                        </>
+                      )}
                     </div>
                   )}
                   {selEffect.followCursor && (

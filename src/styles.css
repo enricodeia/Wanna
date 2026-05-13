@@ -651,6 +651,8 @@ button{ background: none; border: 0; cursor: pointer; padding: 0; color: inherit
 .primitive-btn:hover{ background: var(--ink); color: var(--paper); border-color: var(--ink); transform: translateY(-1px); }
 .primitive-btn:active{ transform: translateY(0); }
 .primitive-icon{ font-size: 36px; line-height: 1; font-weight: 600; }
+.primitive-svg{ display: block; color: var(--ink); }
+.primitive-btn:hover .primitive-svg{ color: var(--paper); }
 .primitive-name{ font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; opacity: 0.85; }
 
 /* Layer rename input */
@@ -750,6 +752,10 @@ button{ background: none; border: 0; cursor: pointer; padding: 0; color: inherit
   height: 100%;
   background: var(--paper);
   cursor: crosshair;
+}
+.canvas-wrap.bg-transparent{
+  background:
+    repeating-conic-gradient(#e6e6e6 0% 25%, #ffffff 25% 50%) 50% / 18px 18px;
 }
 .canvas-wrap.tool-pen canvas{ cursor: crosshair; }
 .canvas-wrap.tool-select canvas{ cursor: default; }
@@ -1096,6 +1102,44 @@ button{ background: none; border: 0; cursor: pointer; padding: 0; color: inherit
   letter-spacing: 0.04em;
   margin-top: 4px;
   text-transform: uppercase;
+}
+
+/* ============ Background panel (left, bottom) ============ */
+.bg-panel{
+  padding: 10px 12px 14px;
+  background: var(--paper);
+  border-bottom: 1px solid var(--line);
+}
+.bg-type-row{
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.bg-type-btn{
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 7px 6px;
+  text-transform: uppercase;
+  border: 1px solid var(--line-strong);
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+  border-radius: 3px;
+}
+.bg-type-btn:hover{ background: var(--hover); }
+.bg-type-btn.on{ background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.bg-transparent-note{
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--mute);
+  text-transform: uppercase;
+  text-align: center;
+  padding: 6px 4px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 3px;
 }
 
 /* ============ Scoped effects (effect bound to a specific layer) ============ */
