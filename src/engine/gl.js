@@ -87,6 +87,59 @@ uniform sampler2D u_tex;
 out vec4 o;
 void main(){ o = texture(u_tex, v_uv); }`
 
+// Compositor — blend a sprite/shape layer (src) with the current accumulator (dst)
+// using a chosen blend mode + opacity.
+const COMPOSITOR_FS = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_dst;
+uniform sampler2D u_src;
+uniform float u_blendMode;
+uniform float u_opacity;
+out vec4 o;
+
+vec3 bMul(vec3 a, vec3 b){ return a * b; }
+vec3 bScreen(vec3 a, vec3 b){ return 1.0 - (1.0 - a) * (1.0 - b); }
+vec3 bOverlay(vec3 a, vec3 b){
+  return mix(2.0 * a * b, 1.0 - 2.0 * (1.0 - a) * (1.0 - b), step(0.5, a));
+}
+vec3 bSoftLight(vec3 a, vec3 b){
+  return mix(2.0 * a * b + a * a * (1.0 - 2.0 * b),
+             sqrt(a) * (2.0 * b - 1.0) + 2.0 * a * (1.0 - b),
+             step(0.5, b));
+}
+vec3 bDarken(vec3 a, vec3 b){ return min(a, b); }
+vec3 bLighten(vec3 a, vec3 b){ return max(a, b); }
+vec3 bDifference(vec3 a, vec3 b){ return abs(a - b); }
+vec3 bExclusion(vec3 a, vec3 b){ return a + b - 2.0 * a * b; }
+vec3 bDodge(vec3 a, vec3 b){ return min(a / max(1.0 - b, 0.001), vec3(1.0)); }
+vec3 bBurn(vec3 a, vec3 b){ return 1.0 - min((1.0 - a) / max(b, 0.001), vec3(1.0)); }
+vec3 bAdd(vec3 a, vec3 b){ return min(a + b, vec3(1.0)); }
+vec3 bSubtract(vec3 a, vec3 b){ return max(a - b, vec3(0.0)); }
+
+void main(){
+  vec4 dst = texture(u_dst, v_uv);
+  vec4 src = texture(u_src, v_uv);
+  int mode = int(u_blendMode + 0.5);
+  vec3 blended;
+  if      (mode == 1) blended = bMul(dst.rgb, src.rgb);
+  else if (mode == 2) blended = bScreen(dst.rgb, src.rgb);
+  else if (mode == 3) blended = bOverlay(dst.rgb, src.rgb);
+  else if (mode == 4) blended = bSoftLight(dst.rgb, src.rgb);
+  else if (mode == 5) blended = bDarken(dst.rgb, src.rgb);
+  else if (mode == 6) blended = bLighten(dst.rgb, src.rgb);
+  else if (mode == 7) blended = bDifference(dst.rgb, src.rgb);
+  else if (mode == 8) blended = bExclusion(dst.rgb, src.rgb);
+  else if (mode == 9) blended = bDodge(dst.rgb, src.rgb);
+  else if (mode == 10) blended = bBurn(dst.rgb, src.rgb);
+  else if (mode == 11) blended = bAdd(dst.rgb, src.rgb);
+  else if (mode == 12) blended = bSubtract(dst.rgb, src.rgb);
+  else                 blended = src.rgb;
+  float a = src.a * u_opacity;
+  vec3 result = mix(dst.rgb, blended, a);
+  o = vec4(result, max(dst.a, a));
+}`
+
 // Mask blend: interpolates between original and effected based on a soft circular cursor mask.
 const MASK_BLEND_FS = `#version 300 es
 precision highp float;
@@ -240,17 +293,20 @@ export function createEngine(canvas){
   const copyU = uniforms(gl, copyProg)
   const maskProg = linkProgram(gl, FULLSCREEN_VS, MASK_BLEND_FS, ['a_pos'])
   const maskU = uniforms(gl, maskProg)
+  const compProg = linkProgram(gl, FULLSCREEN_VS, COMPOSITOR_FS, ['a_pos'])
+  const compU = uniforms(gl, compProg)
 
   const effectPrograms = new Map()
   let W = 0, H = 0
-  let fboA = null, fboB = null, fboC = null
+  let fboA = null, fboB = null, fboC = null, fboD = null
 
   function resize(w, h){
     W = w; H = h; canvas.width = w; canvas.height = h
     if(fboA){ gl.deleteFramebuffer(fboA.fbo); gl.deleteTexture(fboA.tex) }
     if(fboB){ gl.deleteFramebuffer(fboB.fbo); gl.deleteTexture(fboB.tex) }
     if(fboC){ gl.deleteFramebuffer(fboC.fbo); gl.deleteTexture(fboC.tex) }
-    fboA = makeFBO(gl, w, h); fboB = makeFBO(gl, w, h); fboC = makeFBO(gl, w, h)
+    if(fboD){ gl.deleteFramebuffer(fboD.fbo); gl.deleteTexture(fboD.tex) }
+    fboA = makeFBO(gl, w, h); fboB = makeFBO(gl, w, h); fboC = makeFBO(gl, w, h); fboD = makeFBO(gl, w, h)
   }
   function uploadTexture(image){
     const tex = gl.createTexture()
@@ -427,22 +483,63 @@ export function createEngine(canvas){
           t = read; read = write; write = t
         }
       } else {
-        // Sprite/shape/text — render onto current `read` with alpha blending
-        gl.bindFramebuffer(gl.FRAMEBUFFER, read.fbo)
-        gl.viewport(0, 0, W, H)
-        gl.enable(gl.BLEND)
-        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
-        if((layer.type === 'image' || layer.type === 'text') && layer.tex){
-          gl.useProgram(spriteProg)
-          gl.bindVertexArray(spriteVAO)
-          gl.uniform2f(spriteU.u_canvasSize, W, H)
-          gl.uniform1i(spriteU.u_tex, 0)
-          drawSprite(layer)
-        } else if(layer.type === 'shape'){
-          gl.useProgram(shapeProg)
-          drawShape(layer)
+        // Sprite/shape/text — render onto current `read`. Two paths:
+        //   normal blend: render directly with alpha blending
+        //   custom blend mode: render to fboD (scratch), then compositor pass
+        const blendMode = layer.blendMode || 'normal'
+        if(blendMode === 'normal'){
+          gl.bindFramebuffer(gl.FRAMEBUFFER, read.fbo)
+          gl.viewport(0, 0, W, H)
+          gl.enable(gl.BLEND)
+          gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+          if((layer.type === 'image' || layer.type === 'text') && layer.tex){
+            gl.useProgram(spriteProg)
+            gl.bindVertexArray(spriteVAO)
+            gl.uniform2f(spriteU.u_canvasSize, W, H)
+            gl.uniform1i(spriteU.u_tex, 0)
+            drawSprite(layer)
+          } else if(layer.type === 'shape'){
+            gl.useProgram(shapeProg)
+            drawShape(layer)
+          }
+          gl.disable(gl.BLEND)
+        } else {
+          // Render layer alone to fboD (transparent bg)
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fboD.fbo)
+          gl.viewport(0, 0, W, H)
+          gl.clearColor(0, 0, 0, 0)
+          gl.clear(gl.COLOR_BUFFER_BIT)
+          gl.enable(gl.BLEND)
+          gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+          if((layer.type === 'image' || layer.type === 'text') && layer.tex){
+            gl.useProgram(spriteProg)
+            gl.bindVertexArray(spriteVAO)
+            gl.uniform2f(spriteU.u_canvasSize, W, H)
+            gl.uniform1i(spriteU.u_tex, 0)
+            drawSprite(layer)
+          } else if(layer.type === 'shape'){
+            gl.useProgram(shapeProg)
+            drawShape(layer)
+          }
+          gl.disable(gl.BLEND)
+          // Compositor: dst = read, src = fboD → write
+          const blendMap = { normal:0, multiply:1, screen:2, overlay:3, softlight:4, darken:5, lighten:6, difference:7, exclusion:8, dodge:9, burn:10, add:11, subtract:12 }
+          const modeNum = blendMap[blendMode] != null ? blendMap[blendMode] : 0
+          gl.useProgram(compProg)
+          gl.bindVertexArray(fsVAO)
+          gl.bindFramebuffer(gl.FRAMEBUFFER, write.fbo)
+          gl.viewport(0, 0, write.w, write.h)
+          gl.activeTexture(gl.TEXTURE0)
+          gl.bindTexture(gl.TEXTURE_2D, read.tex)
+          if(compU.u_dst) gl.uniform1i(compU.u_dst, 0)
+          gl.activeTexture(gl.TEXTURE1)
+          gl.bindTexture(gl.TEXTURE_2D, fboD.tex)
+          if(compU.u_src) gl.uniform1i(compU.u_src, 1)
+          if(compU.u_blendMode) gl.uniform1f(compU.u_blendMode, modeNum)
+          if(compU.u_opacity) gl.uniform1f(compU.u_opacity, 1.0)  // sprite opacity already applied
+          gl.drawArrays(gl.TRIANGLES, 0, 3)
+          const t = read; read = write; write = t
         }
-        gl.disable(gl.BLEND)
       }
     }
 

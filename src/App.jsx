@@ -32,6 +32,51 @@ const REC_OPTIONS = [5, 10, 15, 30]
 const DEFAULT_TRANSFORM = { x: 0.5, y: 0.5, scale: 1, rotation: 0, opacity: 1 }
 const DEFAULT_FOLLOW = { momentum: 0.18, intensityX: 1.0, intensityY: 1.0 }
 const DEFAULT_MASK = { on: false, radius: 0.3, softness: 0.3, feather: 0.15, invert: false }
+const BLEND_MODES = [
+  ['normal', 0], ['multiply', 1], ['screen', 2], ['overlay', 3], ['soft light', 4],
+  ['darken', 5], ['lighten', 6], ['difference', 7], ['exclusion', 8],
+  ['color dodge', 9], ['color burn', 10], ['add', 11], ['subtract', 12]
+]
+const BLEND_MAP = ['normal','multiply','screen','overlay','softlight','darken','lighten','difference','exclusion','dodge','burn','add','subtract']
+
+// ============ Shape primitive generators ============
+const PRIMITIVES = [
+  { id: 'rect',     label: '+ RECT',     icon: '▭' },
+  { id: 'circle',   label: '+ CIRCLE',   icon: '○' },
+  { id: 'triangle', label: '+ TRIANGLE', icon: '△' },
+  { id: 'star',     label: '+ STAR',     icon: '☆' },
+  { id: 'hex',      label: '+ HEXAGON',  icon: '⬡' }
+]
+function generatePrimitive(kind, cx = 0.5, cy = 0.5, size = 0.18){
+  const pts = []
+  if(kind === 'rect'){
+    pts.push(cx - size, cy - size,  cx + size, cy - size,
+             cx + size, cy + size,  cx - size, cy + size)
+  } else if(kind === 'circle'){
+    const N = 32
+    for(let i = 0; i < N; i++){
+      const a = (i / N) * Math.PI * 2
+      pts.push(cx + Math.cos(a) * size, cy + Math.sin(a) * size)
+    }
+  } else if(kind === 'triangle'){
+    pts.push(cx, cy - size,
+             cx + size * 0.866, cy + size * 0.5,
+             cx - size * 0.866, cy + size * 0.5)
+  } else if(kind === 'star'){
+    const N = 10
+    for(let i = 0; i < N; i++){
+      const a = (i / N) * Math.PI * 2 - Math.PI / 2
+      const r = (i % 2 === 0) ? size : size * 0.45
+      pts.push(cx + Math.cos(a) * r, cy + Math.sin(a) * r)
+    }
+  } else if(kind === 'hex'){
+    for(let i = 0; i < 6; i++){
+      const a = (i / 6) * Math.PI * 2
+      pts.push(cx + Math.cos(a) * size, cy + Math.sin(a) * size)
+    }
+  }
+  return pts
+}
 
 const generateImageThumb = (img, size = 46) => {
   const c = document.createElement('canvas')
@@ -139,6 +184,11 @@ export default function App(){
   const [selectedUid, setSelectedUid] = useState(null)
   const [drawing, setDrawing] = useState({ active: false, points: [] })
   const [collapsedCats, setCollapsedCats] = useState(() => new Set(GROUPS))
+  // Layer rename state: { uid, value } when actively renaming
+  const [renaming, setRenaming] = useState(null)
+  // Drag-reorder state: { uid, overUid, position } where position is 'before'/'after'
+  const [dragOver, setDragOver] = useState(null)
+  const dragUidRef = useRef(null)
 
   const [recDuration, setRecDuration] = useState(5)
   const [recording, setRecording] = useState(false)
@@ -531,6 +581,69 @@ export default function App(){
       return l
     }))
   }
+
+  const addPrimitive = (kind) => {
+    const points = generatePrimitive(kind)
+    setLayers((s) => {
+      const shape = {
+        uid: crypto.randomUUID(), type: 'shape',
+        name: kind,
+        visible: true, _follow: false,
+        points,
+        fill: [...penColor], opacity: 1,
+        x: 0, y: 0, scale: 1, rotation: 0, cornerRadius: 0,
+        blendMode: 'normal'
+      }
+      setSelectedUid(shape.uid)
+      return [...s, shape]
+    })
+  }
+
+  const renameLayer = (uid, newName) => {
+    setLayers((s) => s.map(l => l.uid === uid ? { ...l, name: newName } : l))
+  }
+  const setLayerBlendMode = (uid, mode) => {
+    setLayers((s) => s.map(l => l.uid === uid ? { ...l, blendMode: mode } : l))
+  }
+
+  // Drag-to-reorder. Layers are displayed in REVERSE array order, so we reorder by uid.
+  const onLayerDragStart = (e, uid) => {
+    dragUidRef.current = uid
+    e.dataTransfer.effectAllowed = 'move'
+    try { e.dataTransfer.setData('text/plain', uid) } catch(_){}
+  }
+  const onLayerDragOver = (e, overUid) => {
+    if(!dragUidRef.current || dragUidRef.current === overUid) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+    const rect = e.currentTarget.getBoundingClientRect()
+    const position = (e.clientY - rect.top) < rect.height / 2 ? 'before' : 'after'
+    setDragOver({ overUid, position })
+  }
+  const onLayerDragLeave = () => setDragOver(null)
+  const onLayerDrop = (e, overUid) => {
+    e.preventDefault()
+    const fromUid = dragUidRef.current
+    if(!fromUid || !overUid || fromUid === overUid){ dragUidRef.current = null; setDragOver(null); return }
+    const dragInfo = dragOver
+    setLayers((s) => {
+      const fromIdx = s.findIndex(l => l.uid === fromUid)
+      const overIdx = s.findIndex(l => l.uid === overUid)
+      if(fromIdx < 0 || overIdx < 0) return s
+      const next = [...s]
+      const [item] = next.splice(fromIdx, 1)
+      // After splice, overUid index may have shifted
+      let newOverIdx = next.findIndex(l => l.uid === overUid)
+      // Display is reversed, so 'before' visually = AFTER in array
+      let insertIdx = dragInfo?.position === 'before' ? newOverIdx + 1 : newOverIdx
+      insertIdx = Math.max(0, Math.min(next.length, insertIdx))
+      next.splice(insertIdx, 0, item)
+      return next
+    })
+    dragUidRef.current = null
+    setDragOver(null)
+  }
+  const onLayerDragEnd = () => { dragUidRef.current = null; setDragOver(null) }
 
   const addEffect = (effectId) => {
     setLayers((s) => {
@@ -984,6 +1097,20 @@ export default function App(){
         </div>
 
         <div className="section-bar">
+          <span className="section-letter">P</span>
+          <span className="section-label">PRIMITIVES</span>
+          <span className="section-count">{PRIMITIVES.length}</span>
+        </div>
+        <div className="primitive-grid">
+          {PRIMITIVES.map(p => (
+            <button key={p.id} className="primitive-btn" onClick={() => addPrimitive(p.id)} title={p.label}>
+              <span className="primitive-icon">{p.icon}</span>
+              <span className="primitive-name">{p.id}</span>
+            </button>
+          ))}
+        </div>
+
+        <div className="section-bar">
           <span className="section-letter">F</span>
           <span className="section-label">EFFECTS LIBRARY</span>
           <span className="section-count">{Object.keys(EFFECTS).length}</span>
@@ -1107,16 +1234,28 @@ export default function App(){
           )}
         </div>
         <div className="layer-list reverse-list">
-          {layers.length === 0 && <div className="empty-panel">drop image · sample · pen · text · effect</div>}
-          {/* Display in reverse so top-of-list = top-of-canvas */}
+          {layers.length === 0 && <div className="empty-panel">drop image · sample · pen · text · primitive · effect</div>}
           {[...layers].map((l, displayIdx) => {
             const i = layers.length - 1 - displayIdx
             const ll = layers[i]
             const fx = ll.type === 'effect' ? EFFECTS[ll.effectId] : null
             const followable = ll.type !== 'effect' || (fx && fx.followCursor)
+            const isOver = dragOver?.overUid === ll.uid
             return (
               <div key={ll.uid}
-                className={'layer card-layer ' + (ll.type === 'effect' ? 'is-effect ' : '') + (ll.uid === selectedUid ? 'selected ' : '') + (ll.visible ? '' : 'disabled')}
+                draggable={renaming?.uid !== ll.uid}
+                onDragStart={(e) => onLayerDragStart(e, ll.uid)}
+                onDragOver={(e) => onLayerDragOver(e, ll.uid)}
+                onDragLeave={onLayerDragLeave}
+                onDrop={(e) => onLayerDrop(e, ll.uid)}
+                onDragEnd={onLayerDragEnd}
+                className={
+                  'layer card-layer '
+                  + (ll.type === 'effect' ? 'is-effect ' : '')
+                  + (ll.uid === selectedUid ? 'selected ' : '')
+                  + (ll.visible ? '' : 'disabled ')
+                  + (isOver ? `drop-target drop-${dragOver.position} ` : '')
+                }
                 onClick={() => setSelectedUid(ll.uid)}>
                 <LayerThumb layer={ll} />
                 <div className="card-meta">
@@ -1125,8 +1264,27 @@ export default function App(){
                     <span className="type-icon">{typeBadge(ll)}</span>
                     {ll._follow && <span className="follow-badge" title="follows cursor">⊙</span>}
                     {ll.type === 'effect' && ll.mask?.on && <span className="mask-badge" title="masked">▣</span>}
+                    {ll.blendMode && ll.blendMode !== 'normal' && <span className="blend-badge" title={`blend: ${ll.blendMode}`}>×</span>}
                   </span>
-                  <span className="name">{layerLabel(ll)}</span>
+                  {renaming?.uid === ll.uid ? (
+                    <input
+                      autoFocus
+                      className="layer-rename-input"
+                      value={renaming.value}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => setRenaming({ uid: ll.uid, value: e.target.value })}
+                      onKeyDown={(e) => {
+                        if(e.key === 'Enter'){ renameLayer(ll.uid, renaming.value || ll.name); setRenaming(null) }
+                        if(e.key === 'Escape'){ setRenaming(null) }
+                      }}
+                      onBlur={() => { renameLayer(ll.uid, renaming.value || ll.name); setRenaming(null) }}
+                    />
+                  ) : (
+                    <span
+                      className="name"
+                      onDoubleClick={(e) => { e.stopPropagation(); setRenaming({ uid: ll.uid, value: layerLabel(ll) }) }}
+                    >{layerLabel(ll)}</span>
+                  )}
                 </div>
                 <div className="layer-actions" onClick={(e) => e.stopPropagation()}>
                   {followable && <button className={'follow-btn ' + (ll._follow ? 'on' : '')} title="follow cursor" onClick={() => toggleLayerFollow(ll.uid)}>⊙</button>}
@@ -1273,6 +1431,9 @@ export default function App(){
               )}
               {sel.type !== 'effect' && (
                 <>
+                  <ParamControl param={{ key:'blendMode', label:'blend mode', type:'select', options: BLEND_MODES, default: 0 }}
+                    value={BLEND_MODES.find(([n]) => n === (sel.blendMode || 'normal'))?.[1] ?? 0}
+                    onChange={(v) => setLayerBlendMode(sel.uid, BLEND_MAP[v] || 'normal')} />
                   <ParamControl param={{ key: 'z', label: 'z (depth)', type: 'range', min: 1, max: Math.max(layers.length, 1), step: 1, default: 1 }}
                     value={layers.findIndex(e => e.uid === sel.uid) + 1}
                     onChange={(v) => setLayerZ(sel.uid, v - 1)} />
