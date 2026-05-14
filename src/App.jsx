@@ -29,7 +29,10 @@ const SAMPLES = [
 ]
 
 const REC_OPTIONS = [5, 10, 15, 30]
-const DEFAULT_TRANSFORM = { x: 0.5, y: 0.5, z: 0, scale: 1, rotation: 0, rx: 0, ry: 0, perspective: 1, opacity: 1 }
+// Billboard defaults to true so a sprite stays flat-on-screen when you orbit
+// the 3D camera (no "why is my image deforming" surprise). Turn it off in the
+// right panel to treat the layer as a real 3D plane.
+const DEFAULT_TRANSFORM = { x: 0.5, y: 0.5, z: 0, scale: 1, rotation: 0, rx: 0, ry: 0, perspective: 1, opacity: 1, billboard: true }
 // Curated Google Fonts. User can also paste custom names; we inject the <link>.
 const GOOGLE_FONTS = [
   'Inter', 'Space Grotesk', 'JetBrains Mono', 'Playfair Display', 'Bebas Neue',
@@ -461,7 +464,7 @@ export default function App(){
   const engineRef = useRef(null)
   const [err, setErr] = useState(null)
 
-  const [aspect, setAspect] = useState('1:1')
+  const [aspect, setAspect] = useState('4:3')
   const [bg, setBg] = useState({ ...DEFAULT_BG })
   // 3D scene mode — orbit the canvas like a true 3D scene. yaw / pitch in radians.
   const [cameraMode, setCameraMode] = useState('2d')
