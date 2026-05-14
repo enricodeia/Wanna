@@ -211,23 +211,37 @@ const generateImageThumb = (img, size = 46) => {
   try { ctx.drawImage(img, ox, oy, cw, ch) } catch(e){}
   return c.toDataURL('image/png')
 }
-// Track which Google Fonts have been injected into <head> so we don't double-load.
+// Track Google Fonts: avoid double-loading and notify subscribers when each
+// family actually finishes loading so we can re-render text textures crisply.
 const loadedGoogleFonts = new Set()
+const fontReadyListeners = new Set()
+const onFontReady = (cb) => { fontReadyListeners.add(cb); return () => fontReadyListeners.delete(cb) }
 const ensureGoogleFont = (family) => {
-  if(!family || typeof window === 'undefined') return
+  if(!family || typeof window === 'undefined') return Promise.resolve()
   const key = family.trim()
-  if(!key || loadedGoogleFonts.has(key)) return
-  loadedGoogleFonts.add(key)
-  const link = document.createElement('link')
-  link.rel = 'stylesheet'
-  link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(key).replace(/%20/g, '+')}:wght@400;500;600;700;800;900&display=swap`
-  document.head.appendChild(link)
+  if(!key) return Promise.resolve()
+  if(!loadedGoogleFonts.has(key)){
+    loadedGoogleFonts.add(key)
+    const link = document.createElement('link')
+    link.rel = 'stylesheet'
+    link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(key).replace(/%20/g, '+')}:ital,wght@0,400;0,500;0,600;0,700;0,800;0,900;1,400;1,700&display=swap`
+    document.head.appendChild(link)
+  }
+  // Wait for the actual webfont to be ready, then notify everyone watching.
+  if(document.fonts && document.fonts.load){
+    return document.fonts.load(`700 96px "${key}"`).then(() => {
+      fontReadyListeners.forEach(cb => cb(key))
+    }).catch(() => {})
+  }
+  return Promise.resolve()
 }
 const fontFamilyCss = (family) => family ? `"${family}", system-ui, sans-serif` : 'Inter, system-ui, sans-serif'
 
-// Full-featured text canvas renderer. Used both for layer creation (commitText)
-// and for live updates (updateText). Supports weight, italic, letter-spacing,
-// stroke (outline), fill mode.
+// Full-featured text canvas renderer. Internally renders at SS x supersample
+// so the resulting GL texture stays crisp when scaled up or tilted in 3D
+// (combined with the engine's mipmap + anisotropic filtering on uploadTexture).
+// The DISPLAYED size is unchanged — drawSprite computes its on-canvas pixel
+// size from the *texture* dimensions, which already include the supersample.
 const renderTextToCanvas = (text, opts = {}) => {
   const {
     fontFamily = 'Inter',
@@ -240,38 +254,46 @@ const renderTextToCanvas = (text, opts = {}) => {
     strokeWidth = 0,          // px
     fillEnabled = true
   } = opts
+  const SS = 3 // supersample factor for crisp fonts at any zoom
   const fontCss = `"${fontFamily}", system-ui, sans-serif`
   const styleStr = italic ? 'italic ' : ''
+  const fontPx = size * SS
   const tmp = document.createElement('canvas').getContext('2d')
-  tmp.font = `${styleStr}${weight} ${size}px ${fontCss}`
+  tmp.font = `${styleStr}${weight} ${fontPx}px ${fontCss}`
+  tmp.textBaseline = 'middle'
   const safeText = text || ' '
   const chars = [...safeText]
-  const ls = letterSpacing * size
+  const ls = letterSpacing * fontPx
   let textW = 0
   for(const ch of chars){
     textW += tmp.measureText(ch).width + ls
   }
   textW -= ls
-  const pad = Math.max(24, strokeWidth + 12)
-  const w = Math.max(8, Math.ceil(textW)) + pad * 2
-  const h = Math.ceil(size * 1.6)
+  const strokePx = strokeWidth * SS
+  const pad = Math.max(24 * SS, strokePx + 16 * SS)
+  const w = Math.max(8 * SS, Math.ceil(textW)) + pad * 2
+  const h = Math.ceil(fontPx * 1.6)
   const c = document.createElement('canvas')
   c.width = w; c.height = h
   const ctx = c.getContext('2d')
-  ctx.font = `${styleStr}${weight} ${size}px ${fontCss}`
+  if('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high'
+  ctx.font = `${styleStr}${weight} ${fontPx}px ${fontCss}`
   ctx.textBaseline = 'middle'
   ctx.textAlign = 'left'
   const rgb = (v) => `rgb(${Math.round(v[0]*255)}, ${Math.round(v[1]*255)}, ${Math.round(v[2]*255)})`
   ctx.fillStyle = rgb(color)
   ctx.strokeStyle = rgb(strokeColor)
-  ctx.lineWidth = Math.max(0, strokeWidth)
+  ctx.lineWidth = Math.max(0, strokePx)
   ctx.lineJoin = 'round'
+  ctx.lineCap = 'round'
   let x = pad
   for(const ch of chars){
-    if(strokeWidth > 0) ctx.strokeText(ch, x, h / 2)
+    if(strokePx > 0) ctx.strokeText(ch, x, h / 2)
     if(fillEnabled) ctx.fillText(ch, x, h / 2)
     x += tmp.measureText(ch).width + ls
   }
+  // Stash the supersample factor so callers can compensate the displayed size.
+  c._ssFactor = SS
   return c
 }
 const rgb2hex = (c) => '#' + c.map(x => Math.round(Math.max(0, Math.min(1, x)) * 255).toString(16).padStart(2, '0')).join('')
@@ -443,7 +465,7 @@ export default function App(){
   const [bg, setBg] = useState({ ...DEFAULT_BG })
   // 3D scene mode — orbit the canvas like a true 3D scene. yaw / pitch in radians.
   const [cameraMode, setCameraMode] = useState('2d')
-  const [camera, setCamera] = useState({ yaw: 0, pitch: 0, zoom: 1 })
+  const [camera, setCamera] = useState({ yaw: 0, pitch: 0, zoom: 1, panX: 0, panY: 0 })
   const cameraRef = useRef(camera); cameraRef.current = camera
   const cameraModeRef = useRef(cameraMode); cameraModeRef.current = cameraMode
   const [search, setSearch] = useState('')
@@ -790,6 +812,23 @@ export default function App(){
     addImage('/p1.jpg', 'Boucher · Toilette of Venus')
   }, [addImage])
 
+  // Re-render any text layer whose font has just finished loading. Until the
+  // webfont is actually loaded, the canvas falls back to system fonts; this
+  // hook upgrades the texture once the real font is ready.
+  useEffect(() => {
+    const off = onFontReady((family) => {
+      const list = stateRef.current
+      const targets = list.filter(l => l.type === 'text' && (l.fontFamily || 'Inter') === family)
+      if(!targets.length) return
+      for(const l of targets){
+        // Trigger a no-op fontFamily set to force a re-render via updateText
+        updateText(l.uid, 'fontFamily', l.fontFamily || 'Inter')
+      }
+    })
+    return off
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // ============ Layer ops ============
   // Helper: clean up any GL textures attached to a layer (sprite tex, shape image, derived effect textures).
   const disposeLayerTextures = (l) => {
@@ -938,7 +977,8 @@ export default function App(){
       if(engineRef.current){
         if(updated.tex) engineRef.current.deleteTexture(updated.tex)
         updated.tex = engineRef.current.uploadTexture(c)
-        updated.imgW = c.width; updated.imgH = c.height
+        const ss = c._ssFactor || 1
+        updated.imgW = c.width / ss; updated.imgH = c.height / ss
         updated.thumbnail = c.toDataURL('image/png')
         updated.name = (updated.text || '').slice(0, 24) || 'text'
       }
@@ -1234,6 +1274,7 @@ export default function App(){
       strokeColor: [0, 0, 0], strokeWidth: 0, fillEnabled: true
     })
     const tex = engineRef.current.uploadTexture(canvas)
+    const ss = canvas._ssFactor || 1
     setLayers((s) => {
       const layer = {
         uid: crypto.randomUUID(), type: 'text',
@@ -1242,7 +1283,7 @@ export default function App(){
         fontFamily, size: 96, color: [0, 0, 0],
         weight: 700, italic: false, letterSpacing: 0,
         strokeColor: [0, 0, 0], strokeWidth: 0, fillEnabled: true,
-        tex, imgW: canvas.width, imgH: canvas.height,
+        tex, imgW: canvas.width / ss, imgH: canvas.height / ss,
         thumbnail: canvas.toDataURL('image/png'),
         visible: true, _follow: false,
         transform: { ...DEFAULT_TRANSFORM, x: textDraft.x, y: textDraft.y, scale: 0.6 }
@@ -1378,12 +1419,23 @@ export default function App(){
     }
     const hit = hitTest(px, py, rect.width, rect.height)
     if(!hit){
-      // In 3D mode, clicking an empty area starts a camera orbit drag (Blender-style).
+      // In 3D mode, clicking an empty area starts a camera drag.
+      // Shift = pan, otherwise orbit (Blender-style).
       if(cameraMode === '3d'){
-        dragRef.current = {
-          kind: 'orbit',
-          startX: e.clientX, startY: e.clientY,
-          startYaw: cameraRef.current.yaw, startPitch: cameraRef.current.pitch
+        if(e.shiftKey){
+          dragRef.current = {
+            kind: 'pan',
+            startX: e.clientX, startY: e.clientY,
+            startPanX: cameraRef.current.panX || 0,
+            startPanY: cameraRef.current.panY || 0,
+            rectW: rect.width, rectH: rect.height
+          }
+        } else {
+          dragRef.current = {
+            kind: 'orbit',
+            startX: e.clientX, startY: e.clientY,
+            startYaw: cameraRef.current.yaw, startPitch: cameraRef.current.pitch
+          }
         }
         e.currentTarget.setPointerCapture?.(e.pointerId)
         return
@@ -1417,6 +1469,12 @@ export default function App(){
       setCamera((c) => ({ ...c, yaw: newYaw, pitch: newPitch }))
       return
     }
+    if(d.kind === 'pan'){
+      const dx = (e.clientX - d.startX) / d.rectW
+      const dy = (e.clientY - d.startY) / d.rectH
+      setCamera((c) => ({ ...c, panX: d.startPanX + dx, panY: d.startPanY + dy }))
+      return
+    }
     if(d.kind === 'vertex'){
       const sh = layers.find(x => x.uid === d.uid)
       if(!sh) return
@@ -1441,6 +1499,17 @@ export default function App(){
   const onCanvasPointerUp = (e) => {
     dragRef.current = null
     e.currentTarget.releasePointerCapture?.(e.pointerId)
+  }
+  // Mouse wheel / trackpad pinch in 3D = zoom. Mac trackpad pinch arrives as
+  // wheel with ctrlKey, so treat both the same.
+  const onCanvasWheel = (e) => {
+    if(cameraMode !== '3d') return
+    e.preventDefault()
+    const delta = e.deltaY
+    setCamera((c) => {
+      const z = Math.max(0.15, Math.min(4, c.zoom * (1 - delta * 0.0012)))
+      return { ...c, zoom: z }
+    })
   }
   const onCanvasPointerLeave = () => {
     mouseTargetRef.current = { x: 0.5, y: 0.5 }
@@ -1625,6 +1694,15 @@ export default function App(){
           </div>
         </div>
         <div className="actions">
+          {/* Fast commands — visible-only-when-3D camera tools */}
+          {cameraMode === '3d' && (
+            <div className="fast-cmd-group" title="3D camera fast commands">
+              <button className="fast-cmd" title="Snap front view (yaw 0 · pitch 0)" onClick={() => setCamera({ yaw: 0, pitch: 0, zoom: 1, panX: 0, panY: 0 })}>F</button>
+              <button className="fast-cmd" title="Snap side view (yaw 90°)" onClick={() => setCamera({ yaw: Math.PI/2, pitch: 0, zoom: 1, panX: 0, panY: 0 })}>S</button>
+              <button className="fast-cmd" title="Snap top view (pitch 90°)" onClick={() => setCamera({ yaw: 0, pitch: Math.PI/2 - 0.001, zoom: 1, panX: 0, panY: 0 })}>T</button>
+              <button className="fast-cmd" title="Reset camera" onClick={() => setCamera({ yaw: 0.35, pitch: 0.45, zoom: 0.92, panX: 0, panY: 0 })}>⟲</button>
+            </div>
+          )}
           <button className="btn" disabled={!canUndo} onClick={undo} title="Undo (⌘Z)">⌘Z</button>
           <button className="btn" disabled={!canRedo} onClick={redo} title="Redo (⌘⇧Z)">⌘⇧Z</button>
           <label className="btn">
@@ -1784,7 +1862,8 @@ export default function App(){
       <div className="center">
         <div className={'canvas-wrap tool-' + tool + (bg.type === 'transparent' ? ' bg-transparent' : '')} style={aspectStyle}
           onDragOver={onCanvasDragOver}
-          onDrop={onCanvasDrop}>
+          onDrop={onCanvasDrop}
+          onWheel={onCanvasWheel}>
           <div className="canvas-tag">{layers.length} layers · {activeEffects} fx{recording ? ` · REC ${recCountdown}s` : ''}</div>
           <canvas ref={canvasRef}
             onPointerDown={onCanvasPointerDown}
@@ -2054,6 +2133,13 @@ export default function App(){
                   <ParamControl param={{ key: 'perspective', label: 'perspective', type: 'range', min: 0, max: 3, step: 0.001, default: 1 }}
                     value={sel.transform.perspective != null ? sel.transform.perspective : 1}
                     onChange={(v) => updateImageTransform(sel.uid, 'perspective', v)} />
+                  <div className="param">
+                    <div className="toggle">
+                      <div className={'switch ' + (sel.transform.billboard ? 'on' : '')}
+                        onClick={() => updateImageTransform(sel.uid, 'billboard', !sel.transform.billboard)} />
+                      <span className="label-scrub">billboard (face camera)</span>
+                    </div>
+                  </div>
                   <ParamControl param={{ key: 'opacity', label: 'opacity', type: 'range', min: 0, max: 1, step: 0.01, default: 1 }}
                     value={sel.transform.opacity} onChange={(v) => updateImageTransform(sel.uid, 'opacity', v)} />
                 </>

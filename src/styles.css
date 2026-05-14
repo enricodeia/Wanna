@@ -72,6 +72,30 @@ button{ background: none; border: 0; cursor: pointer; padding: 0; color: inherit
 .center-toolbar > .tools:first-child{ justify-self: start; }
 .center-toolbar > .cam-toggle{ justify-self: center; }
 .center-toolbar > .aspect-toggle{ justify-self: end; }
+
+/* ============ Fast commands (3D camera) ============ */
+.fast-cmd-group{
+  display: flex;
+  border: 1px solid var(--ink);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-right: 4px;
+}
+.fast-cmd{
+  width: 30px;
+  height: 30px;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0;
+  background: var(--paper);
+  color: var(--ink);
+  border: 0;
+  border-right: 1px solid var(--ink);
+  cursor: pointer;
+}
+.fast-cmd:last-child{ border-right: 0; }
+.fast-cmd:hover{ background: var(--ink); color: var(--paper); }
 .tools{
   display: flex;
   gap: 0;

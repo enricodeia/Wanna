@@ -2258,13 +2258,18 @@ void main(){
 const BABY_TRACK = `${HEADER}
 uniform float u_gridX, u_gridY;
 uniform float u_threshold;
-uniform float u_chaos;          // 0 = pure saliency, 1 = pure random
+uniform float u_chaos;          // 0 = pure image-driven, 1 = ignore image
 uniform float u_shape;          // 0=rect 1=circle 2=diamond
 uniform float u_strokeW;        // stroke thickness in cell-fraction
 uniform float u_effectMix;
 uniform float u_showStroke;
 uniform float u_showCorners;
+uniform float u_showCrosshair;
+uniform float u_showConfBar;
+uniform float u_showScan;
+uniform float u_pulse;          // stroke pulse intensity 0..1
 uniform float u_animSpeed;      // boxes refresh / drift over time
+uniform float u_salPower;       // gamma on saliency (sharpens vs softens)
 uniform float u_mix;
 uniform vec3  u_strokeColor;
 // 8 effect-toggle slots — disabled cells just show the bracket
@@ -2273,17 +2278,30 @@ uniform vec3  u_duoA, u_duoB;
 
 float btLuma(vec2 uv){ return luma(texture(u_tex, uv).rgb); }
 
-// 5-tap luma variance per cell — interesting (busy) cells light up
+// Real image-driven saliency: a Sobel-style edge magnitude on the cell + a
+// chromaticity term (how saturated the cell is). The combination keeps the
+// boxes locked onto features (edges, faces, colorful patches) instead of
+// drifting at random.
 float cellSaliency(vec2 cellId, vec2 cellSize){
   vec2 c0 = (cellId + 0.5) * cellSize;
-  float l0 = btLuma(c0);
-  float l1 = btLuma(c0 + vec2(cellSize.x * 0.30, 0.0));
-  float l2 = btLuma(c0 - vec2(cellSize.x * 0.30, 0.0));
-  float l3 = btLuma(c0 + vec2(0.0, cellSize.y * 0.30));
-  float l4 = btLuma(c0 - vec2(0.0, cellSize.y * 0.30));
-  float m = (l0 + l1 + l2 + l3 + l4) * 0.2;
-  float v = ((l0-m)*(l0-m) + (l1-m)*(l1-m) + (l2-m)*(l2-m) + (l3-m)*(l3-m) + (l4-m)*(l4-m)) * 0.2;
-  return clamp(sqrt(v) * 4.0, 0.0, 1.0);
+  vec2 d  = cellSize * 0.30;
+  float lTL = btLuma(c0 + vec2(-d.x, -d.y));
+  float lT  = btLuma(c0 + vec2( 0.0, -d.y));
+  float lTR = btLuma(c0 + vec2( d.x, -d.y));
+  float lL  = btLuma(c0 + vec2(-d.x,  0.0));
+  float lR  = btLuma(c0 + vec2( d.x,  0.0));
+  float lBL = btLuma(c0 + vec2(-d.x,  d.y));
+  float lB  = btLuma(c0 + vec2( 0.0,  d.y));
+  float lBR = btLuma(c0 + vec2( d.x,  d.y));
+  float gx = (lTR + 2.0*lR + lBR) - (lTL + 2.0*lL + lBL);
+  float gy = (lBL + 2.0*lB + lBR) - (lTL + 2.0*lT + lTR);
+  float edges = clamp(length(vec2(gx, gy)) * 0.65, 0.0, 1.0);
+  // Chromaticity: distance from grayscale at the cell center
+  vec3 col = texture(u_tex, c0).rgb;
+  float lc = luma(col);
+  float chroma = clamp(length(col - vec3(lc)) * 2.5, 0.0, 1.0);
+  float sal = max(edges, chroma * 0.85);
+  return pow(sal, max(u_salPower, 0.1));
 }
 
 float fxEnabled(int idx){
@@ -2379,11 +2397,12 @@ void main(){
   // Time-stepped hash so the random activation pool refreshes / animates.
   float tStep = floor(u_time * max(u_animSpeed, 0.0));
   float h = hash(cellId * vec2(17.3, 91.7) + tStep);
+  // Saliency dominates by default; chaos blends in randomness.
   float activate = mix(sal, h, u_chaos);
 
   if(activate < u_threshold){ o = vec4(base, 1.0); return; }
 
-  // Effect index per cell — also drifts with time so different cells take turns
+  // Effect index per cell — drifts with time so different cells take turns
   float effHash = hash(cellId * vec2(31.7, 53.1) + tStep * 0.37);
   int idx = int(floor(effHash * 8.0));
   float ena = fxEnabled(idx);
@@ -2392,11 +2411,43 @@ void main(){
   vec3 fx = microEffect(idx, v_uv, cellId);
   vec3 res = mix(base, fx, inside * u_effectMix * ena);
 
+  // Pulsing stroke — each cell has its own phase so they breathe out of sync.
+  float cellPhase = hash(cellId + 3.7) * 6.28;
+  float pulseEnv = u_pulse > 0.001 ? (0.7 + 0.3 * sin(u_time * 3.0 + cellPhase)) : 1.0;
+  float strokeW = u_strokeW * mix(1.0, pulseEnv, u_pulse);
+
   if(u_showStroke > 0.5){
-    res = mix(res, u_strokeColor, strokeMask(inCell, u_strokeW));
+    res = mix(res, u_strokeColor, strokeMask(inCell, strokeW));
   }
   if(u_showCorners > 0.5 && u_shape < 0.5){
-    res = mix(res, u_strokeColor, cornerBrackets(inCell, u_strokeW));
+    res = mix(res, u_strokeColor, cornerBrackets(inCell, strokeW));
+  }
+  // Cross-hair at cell center
+  if(u_showCrosshair > 0.5){
+    vec2 dC = abs(inCell - 0.5);
+    float armLen = 0.18, armW = max(strokeW * 0.5, 0.005);
+    float h1 = step(dC.y, armW) * step(dC.x, armLen);
+    float v1 = step(dC.x, armW) * step(dC.y, armLen);
+    res = mix(res, u_strokeColor, max(h1, v1));
+  }
+  // Confidence bar at the bottom of the cell — length tracks saliency.
+  if(u_showConfBar > 0.5 && u_shape < 0.5){
+    float bx = inCell.x;
+    float by = inCell.y;
+    float yMin = 1.0 - strokeW * 4.0;
+    float yMax = 1.0 - strokeW * 1.5;
+    float xMin = strokeW * 1.5;
+    float xMax = xMin + (1.0 - strokeW * 3.0) * clamp(activate, 0.0, 1.0);
+    if(by > yMin && by < yMax && bx > xMin && bx < xMax){
+      res = u_strokeColor;
+    }
+  }
+  // Scan line — a horizontal beam moving down each cell, phased per cell.
+  if(u_showScan > 0.5){
+    float sy = fract(u_time * 0.35 + hash(cellId + 5.3));
+    float dist = abs(inCell.y - sy);
+    float scan = exp(-dist * 50.0);
+    res = mix(res, u_strokeColor, scan * 0.6 * inside);
   }
 
   o = vec4(mix(base, res, u_mix), 1.0);
@@ -2451,17 +2502,22 @@ export const EFFECTS = {
   babyTrack: {
     id:'babyTrack', label:'BABY TRACK', group:'TRACKING', fs: BABY_TRACK,
     params: [
-      { key:'u_gridX',       label:'cols',          type:'range',  min:2, max:40, step:1,    default:8 },
-      { key:'u_gridY',       label:'rows',          type:'range',  min:2, max:40, step:1,    default:8 },
-      { key:'u_threshold',   label:'threshold',     type:'range',  min:0, max:1, step:0.001, default:0.45 },
-      { key:'u_chaos',       label:'chaos',         type:'range',  min:0, max:1, step:0.01,  default:0.6 },
-      { key:'u_animSpeed',   label:'anim speed',    type:'range',  min:0, max:8, step:0.01,  default:1.2 },
+      { key:'u_gridX',       label:'cols',          type:'range',  min:2, max:40, step:1,    default:10 },
+      { key:'u_gridY',       label:'rows',          type:'range',  min:2, max:40, step:1,    default:10 },
+      { key:'u_threshold',   label:'threshold',     type:'range',  min:0, max:1, step:0.001, default:0.18 },
+      { key:'u_salPower',    label:'saliency gamma',type:'range',  min:0.3, max:3, step:0.01, default:1 },
+      { key:'u_chaos',       label:'chaos',         type:'range',  min:0, max:1, step:0.01,  default:0.05 },
+      { key:'u_animSpeed',   label:'anim speed',    type:'range',  min:0, max:6, step:0.01,  default:1.0 },
+      { key:'u_pulse',       label:'pulse',         type:'range',  min:0, max:1, step:0.01,  default:0.6 },
       { key:'u_shape',       label:'box shape',     type:'select', options:[['rect',0],['circle',1],['diamond',2]], default:0 },
-      { key:'u_strokeW',     label:'stroke',        type:'range',  min:0, max:0.2, step:0.001, default:0.05 },
+      { key:'u_strokeW',     label:'stroke',        type:'range',  min:0, max:0.2, step:0.001, default:0.045 },
       { key:'u_strokeColor', label:'stroke color',  type:'color',  default: c(0.05, 1, 0.6) },
       { key:'u_effectMix',   label:'inside mix',    type:'range',  min:0, max:1, step:0.01, default:1 },
       { key:'u_showStroke',  label:'show stroke',   type:'toggle', default:true },
       { key:'u_showCorners', label:'corner AF',     type:'toggle', default:true },
+      { key:'u_showCrosshair', label:'crosshair',   type:'toggle', default:true },
+      { key:'u_showConfBar',   label:'confidence bar', type:'toggle', default:true },
+      { key:'u_showScan',      label:'scan line',   type:'toggle', default:true },
       // Pool of micro-effects — toggle which ones can appear in a tracked cell
       { key:'u_fx0', label:'· invert',     type:'toggle', default:true },
       { key:'u_fx1', label:'· aberration', type:'toggle', default:true },

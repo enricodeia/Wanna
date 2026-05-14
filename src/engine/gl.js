@@ -29,17 +29,21 @@ uniform float u_camMode;       // 0 = 2D, 1 = 3D
 uniform float u_camYaw;
 uniform float u_camPitch;
 uniform float u_camZoom;
+uniform vec2  u_camPan;        // 2D pan (shift+drag in 3D mode)
+uniform float u_billboard;     // 1 = quad always faces camera
 out vec2 v_uv;
 void main(){
   vec3 p = vec3(a_pos * u_size, 0.0);
 
-  // Local rotations around sprite origin.
+  // Local rotations around sprite origin (z, then x, then y).
   float cz = cos(u_rotation), sz = sin(u_rotation);
   p = mat3(cz, -sz, 0.0,  sz, cz, 0.0,  0.0, 0.0, 1.0) * p;
-  float cx = cos(u_rx), sx = sin(u_rx);
-  p = mat3(1.0, 0.0, 0.0,  0.0, cx, -sx,  0.0, sx, cx) * p;
-  float cy = cos(u_ry), sy = sin(u_ry);
-  p = mat3(cy, 0.0, sy,  0.0, 1.0, 0.0,  -sy, 0.0, cy) * p;
+  if(u_billboard < 0.5){
+    float cx = cos(u_rx), sx = sin(u_rx);
+    p = mat3(1.0, 0.0, 0.0,  0.0, cx, -sx,  0.0, sx, cx) * p;
+    float cy = cos(u_ry), sy = sin(u_ry);
+    p = mat3(cy, 0.0, sy,  0.0, 1.0, 0.0,  -sy, 0.0, cy) * p;
+  }
 
   // Place sprite in world: 2D center + scene depth.
   p.xy += u_center;
@@ -48,21 +52,34 @@ void main(){
   vec2 cc = u_canvasSize * 0.5;
 
   if(u_camMode > 0.5){
-    // 3D scene mode — orbit the camera around the canvas center.
+    // Move into scene-centered space and apply camera orbit + zoom + pan.
     p.xy -= cc;
-    float cyw = cos(u_camYaw), syw = sin(u_camYaw);
-    p = mat3(cyw, 0.0, syw,  0.0, 1.0, 0.0,  -syw, 0.0, cyw) * p;
-    float cpt = cos(u_camPitch), spt = sin(u_camPitch);
-    p = mat3(1.0, 0.0, 0.0,  0.0, cpt, -spt,  0.0, spt, cpt) * p;
+    if(u_billboard < 0.5){
+      float cyw = cos(u_camYaw), syw = sin(u_camYaw);
+      p = mat3(cyw, 0.0, syw,  0.0, 1.0, 0.0,  -syw, 0.0, cyw) * p;
+      float cpt = cos(u_camPitch), spt = sin(u_camPitch);
+      p = mat3(1.0, 0.0, 0.0,  0.0, cpt, -spt,  0.0, spt, cpt) * p;
+    } else {
+      // Billboard: rotate only the *anchor* (pivot of size 0,0,0) by the camera,
+      // then re-add the local quad offset so the quad keeps facing the screen.
+      vec3 anchor = vec3(0.0, 0.0, p.z);
+      vec3 quadOffset = p - anchor; // quadOffset.z is 0 if no local rx/ry
+      float cyw = cos(u_camYaw), syw = sin(u_camYaw);
+      anchor = mat3(cyw, 0.0, syw,  0.0, 1.0, 0.0,  -syw, 0.0, cyw) * anchor;
+      float cpt = cos(u_camPitch), spt = sin(u_camPitch);
+      anchor = mat3(1.0, 0.0, 0.0,  0.0, cpt, -spt,  0.0, spt, cpt) * anchor;
+      p = anchor + quadOffset;
+    }
     p.xy *= u_camZoom;
-    p.xy += cc;
+    p.xy += cc + u_camPan;
   }
 
   // Perspective: in 2D mode it pivots around the sprite center (so local
   // rx/ry tilts read as a card flipping). In 3D mode it pivots around the
-  // canvas center so the whole scene shares one camera.
+  // canvas center so the whole scene shares one camera. Focal length is
+  // larger in 3D so depth changes feel like a real camera, not a fish-eye.
   float strength = max(u_perspective, 0.001);
-  float focal = 1400.0 / strength;
+  float focal = (u_camMode > 0.5 ? 2200.0 : 1400.0) / strength;
   float denom = max(focal - p.z, 80.0);
   float persp = focal / denom;
   vec2 pivot = (u_camMode > 0.5) ? cc : u_center;
@@ -273,6 +290,7 @@ uniform float u_camPitch;
 uniform float u_camZoom;
 uniform float u_perspective;
 uniform vec2 u_anchor;        // canvas center
+uniform vec2 u_pan;            // camera pan offset
 out vec3 v_color;
 out float v_alpha;
 void main(){
@@ -286,11 +304,11 @@ void main(){
   // Distance fade so far-away grid cells dim out to nothing
   v_alpha = 1.0 - clamp(length(a_pos) / 2200.0, 0.0, 1.0);
   v_color = a_color;
-  // Place around canvas center
-  p.xy += u_anchor;
-  // Bounded perspective (matches sprite shader)
+  // Place around canvas center, with camera pan
+  p.xy += u_anchor + u_pan;
+  // Bounded perspective (matches sprite shader, gentler 3D focal)
   float strength = max(u_perspective, 0.001);
-  float focal = 1400.0 / strength;
+  float focal = 2200.0 / strength;
   float denom = max(focal - p.z, 80.0);
   float persp = focal / denom;
   p.xy = (p.xy - u_anchor) * persp + u_anchor;
@@ -593,6 +611,7 @@ export function createEngine(canvas){
     if(gridU.u_camYaw)     gl.uniform1f(gridU.u_camYaw, cam.yaw || 0)
     if(gridU.u_camPitch)   gl.uniform1f(gridU.u_camPitch, cam.pitch || 0)
     if(gridU.u_camZoom)    gl.uniform1f(gridU.u_camZoom, cam.zoom != null ? cam.zoom : 1)
+    if(gridU.u_pan)        gl.uniform2f(gridU.u_pan, (cam.panX || 0) * W, (cam.panY || 0) * H)
     if(gridU.u_perspective) gl.uniform1f(gridU.u_perspective, 1.0)
     if(gridU.u_intensity)  gl.uniform1f(gridU.u_intensity, intensity)
     gl.enable(gl.BLEND)
@@ -621,8 +640,18 @@ export function createEngine(canvas){
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true)
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image)
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    // WebGL2 supports NPOT mipmaps natively. Enable trilinear filtering so text
+    // and images stay crisp when scaled / tilted instead of looking blocky.
+    try { gl.generateMipmap(gl.TEXTURE_2D) } catch(_){}
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    // Anisotropic filtering when available — much sharper at oblique tilts.
+    const anisoExt = gl.getExtension('EXT_texture_filter_anisotropic')
+                   || gl.getExtension('WEBKIT_EXT_texture_filter_anisotropic')
+    if(anisoExt){
+      const max = gl.getParameter(anisoExt.MAX_TEXTURE_MAX_ANISOTROPY_EXT)
+      gl.texParameteri(gl.TEXTURE_2D, anisoExt.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, max))
+    }
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
     return { tex, width: image.width, height: image.height }
@@ -658,11 +687,12 @@ export function createEngine(canvas){
 
   let currentCam = null
   function setCameraUniforms(){
-    const cam = currentCam || { mode: '2d', yaw: 0, pitch: 0, zoom: 1 }
+    const cam = currentCam || { mode: '2d', yaw: 0, pitch: 0, zoom: 1, panX: 0, panY: 0 }
     if(spriteU.u_camMode)  gl.uniform1f(spriteU.u_camMode,  cam.mode === '3d' ? 1 : 0)
     if(spriteU.u_camYaw)   gl.uniform1f(spriteU.u_camYaw,   cam.yaw || 0)
     if(spriteU.u_camPitch) gl.uniform1f(spriteU.u_camPitch, cam.pitch || 0)
     if(spriteU.u_camZoom)  gl.uniform1f(spriteU.u_camZoom,  cam.zoom != null ? cam.zoom : 1)
+    if(spriteU.u_camPan)   gl.uniform2f(spriteU.u_camPan,   (cam.panX || 0) * W, (cam.panY || 0) * H)
   }
   function drawSprite(s){
     const t = s.transform || s
@@ -682,6 +712,7 @@ export function createEngine(canvas){
     // Layer z is in scene units; multiply by canvasMin so the slider's 0..1 range
     // pushes the sprite a meaningful distance forward / back.
     if(spriteU.u_layerZ) gl.uniform1f(spriteU.u_layerZ, (t.z || 0) * canvasMin)
+    if(spriteU.u_billboard) gl.uniform1f(spriteU.u_billboard, t.billboard ? 1 : 0)
     setCameraUniforms()
     gl.uniform1f(spriteU.u_opacity, t.opacity == null ? 1 : t.opacity)
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
