@@ -2974,7 +2974,7 @@ export const EFFECTS = {
     { key:'u_normalAmt',      label:'normal intensity',    type:'range', min:0, max:5, step:0.01, default:1 },
     { key:'u_depthAmt',       label:'depth intensity',     type:'range', min:0, max:3, step:0.01, default:1 },
     { key:'u_roughAmt',       label:'roughness intensity', type:'range', min:0, max:3, step:0.01, default:1 },
-    { key:'u_parallax',       label:'parallax',            type:'range', min:-2, max:2, step:0.001, default:0.5 },
+    { key:'u_parallax',       label:'parallax',            type:'range', min:-2, max:2, step:0.001, default:0 },
     { key:'u_lightAngle',     label:'light angle',         type:'range', min:0, max:360, step:1, default:135 },
     { key:'u_lightHeight',    label:'light elevation',     type:'range', min:0.05, max:3, step:0.01, default:0.9 },
     { key:'u_lightIntensity', label:'light intensity',     type:'range', min:0, max:3, step:0.01, default:1.2 },
@@ -2987,19 +2987,6 @@ export const EFFECTS = {
   ]},
 
   // INTERACT — cursor-driven effects
-  immersive: { id:'immersive', label:'IMMERSIVE (3D PUNCH)', group:'INTERACT', fs: IMMERSIVE, params: [
-    { key:'u_radius',         label:'radius',        type:'range', min:0.05, max:1.5, step:0.001, default:0.35 },
-    { key:'u_amplitude',      label:'amplitude',     type:'range', min:0, max:3, step:0.01, default:1.2 },
-    { key:'u_normalStrength', label:'normal detail', type:'range', min:0, max:20, step:0.1, default:5 },
-    { key:'u_parallax',       label:'parallax',      type:'range', min:-1, max:1, step:0.001, default:0.18 },
-    { key:'u_lightAngle',     label:'light angle',   type:'range', min:0, max:360, step:1, default:135 },
-    { key:'u_lightHeight',    label:'light height',  type:'range', min:0.2, max:3, step:0.01, default:0.8 },
-    { key:'u_specular',       label:'specular',      type:'range', min:0, max:2, step:0.01, default:0.7 },
-    { key:'u_ambient',        label:'ambient',       type:'range', min:0, max:1, step:0.01, default:0.55 },
-    { key:'u_lightColor',     label:'light color',   type:'color', default: c(1, 0.95, 0.85) },
-    { key:'u_shadowColor',    label:'shadow tint',   type:'color', default: c(0.5, 0.55, 0.7) },
-    { key:'u_mix',            label:'mix',           type:'range', min:0, max:1, step:0.01, default:1 }
-  ]},
   cursorLens:      { id:'cursorLens', label:'CURSOR LENS', group:'INTERACT', fs: CURSOR_LENS, params: [
     { key:'u_radius',   label:'radius',   type:'range', min:0.05, max:1.5, step:0.001, default:0.3 },
     { key:'u_strength', label:'strength', type:'range', min:-3, max:3, step:0.01, default:1 },

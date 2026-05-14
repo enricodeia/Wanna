@@ -4,6 +4,13 @@ import { EFFECTS, defaultValues } from './effects/index.js'
 import ParamControl from './components/ParamControl.jsx'
 
 const GROUPS = ['TRACKING', '3D MAPPING', 'INTERACT', 'DISTORT', 'PRINT', 'PATTERN', 'COLOR', 'LIGHT', 'STYLIZE', 'FOCUS', 'GLITCH']
+const FAV_KEY = 'bianca:favorites:v1'
+const loadFavorites = () => {
+  try { return new Set(JSON.parse(localStorage.getItem(FAV_KEY) || '[]')) } catch(_){ return new Set() }
+}
+const saveFavorites = (set) => {
+  try { localStorage.setItem(FAV_KEY, JSON.stringify([...set])) } catch(_){}
+}
 
 const ASPECTS = [
   { id: '1:1',  w: 1, h: 1 },
@@ -47,7 +54,7 @@ const GOOGLE_FONTS = [
 ]
 const DEFAULT_FOLLOW = { momentum: 0.18, intensityX: 1.0, intensityY: 1.0 }
 const DEFAULT_MASK = {
-  on: false, radius: 0.3, softness: 0.3, feather: 0.15, invert: false,
+  on: false, radius: 0.5, softness: 0.4, feather: 0.2, invert: false,
   warpType: 0, warpAmount: 0, warpScale: 4, warpSpeed: 0.5
 }
 const MASK_WARP_OPTIONS = [
@@ -546,6 +553,15 @@ export default function App(){
   const [camera, setCamera] = useState({ yaw: 0, pitch: 0, zoom: 1, panX: 0, panY: 0 })
   const cameraRef = useRef(camera); cameraRef.current = camera
   const cameraModeRef = useRef(cameraMode); cameraModeRef.current = cameraMode
+  const [favorites, setFavorites] = useState(loadFavorites)
+  const toggleFavorite = (id) => {
+    setFavorites(prev => {
+      const next = new Set(prev)
+      if(next.has(id)) next.delete(id); else next.add(id)
+      saveFavorites(next)
+      return next
+    })
+  }
   const [search, setSearch] = useState('')
   const [tool, setTool] = useState('select')
   const [penColor, setPenColor] = useState([0.05, 0.05, 0.05])
@@ -723,6 +739,18 @@ export default function App(){
   }, [])
 
   const [resizeTick, setResizeTick] = useState(0)
+  const [cursorTick, setCursorTick] = useState(0)
+  // Drive a per-frame re-render ONLY when a masked effect is selected so the
+  // dashed mask circle on the canvas tracks the cursor live (and the warp
+  // animation stays in sync with the actual shader).
+  useEffect(() => {
+    const sel = layers.find(l => l.uid === selectedUid)
+    if(!sel || sel.type !== 'effect' || !sel.mask?.on) return
+    let raf
+    const tick = () => { setCursorTick(t => (t + 1) & 65535); raf = requestAnimationFrame(tick) }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [selectedUid, layers])
   useEffect(() => {
     const onResize = () => setResizeTick(x => x + 1)
     window.addEventListener('resize', onResize)
@@ -785,20 +813,31 @@ export default function App(){
     })
   }
   // Video upload — creates a layer that re-uploads its texture every frame.
+  // We use loadedmetadata (fires sooner than loadeddata) and immediately seed
+  // a black placeholder canvas the size of the actual video so the displayed
+  // sprite aspect is right from frame 1 even before the first decoded frame
+  // lands. play() is muted + playsInline so browser autoplay policies allow
+  // it after a user file pick.
   const addVideo = (file) => {
     if(!engineRef.current || !file) return
     const url = URL.createObjectURL(file)
     const video = document.createElement('video')
     video.src = url
-    video.crossOrigin = 'anonymous'
     video.loop = true
     video.muted = true
     video.playsInline = true
     video.autoplay = true
     video.preload = 'auto'
-    video.addEventListener('loadeddata', () => {
-      // Seed a 1x1 placeholder texture; the render loop will re-upload from the video each frame.
-      const ph = document.createElement('canvas'); ph.width = 1; ph.height = 1
+    let added = false
+    const addOnce = () => {
+      if(added) return
+      added = true
+      const W = video.videoWidth || 320
+      const H = video.videoHeight || 180
+      const ph = document.createElement('canvas')
+      ph.width = W; ph.height = H
+      const pctx = ph.getContext('2d')
+      pctx.fillStyle = '#000'; pctx.fillRect(0, 0, W, H)
       const tex = engineRef.current.uploadTexture(ph)
       setLayers((s) => {
         const idx = s.length
@@ -810,7 +849,7 @@ export default function App(){
         const layer = {
           uid: crypto.randomUUID(), type: 'video',
           name: file.name,
-          tex, imgW: video.videoWidth, imgH: video.videoHeight,
+          tex, imgW: W, imgH: H,
           _video: video, _videoUrl: url, _playing: true,
           thumbnail: null, visible: true, _follow: false, transform: t,
           blendMode: 'normal'
@@ -818,9 +857,19 @@ export default function App(){
         setSelectedUid(layer.uid)
         return [...s, layer]
       })
-      video.play().catch(() => {})
-    })
-    video.addEventListener('error', () => console.warn('video load failed', file.name))
+      // Try to play. If autoplay is blocked, the user can hit play in the right panel.
+      const tryPlay = () => video.play().catch(() => {
+        // Retry once on the next user pointer event (common in Safari)
+        const retry = () => { video.play().catch(() => {}); window.removeEventListener('pointerdown', retry) }
+        window.addEventListener('pointerdown', retry, { once: true })
+      })
+      tryPlay()
+    }
+    video.addEventListener('loadedmetadata', addOnce)
+    video.addEventListener('loadeddata', addOnce)
+    video.addEventListener('error', (e) => console.warn('[bianca] video load failed:', file.name, video.error))
+    // Kick the load explicitly
+    try { video.load() } catch(_){}
   }
   const onUpload = async (files) => {
     if(!files) return
@@ -1466,16 +1515,39 @@ export default function App(){
         }
         if(inside) return { type: 'shape', el: l }
       } else {
+        // Sprite hit-test. Project the four corners through the actual sprite
+        // pipeline (so 3D camera, rx/ry tilt, and perspective all count) and do
+        // a ray-cast point-in-polygon. Falls back to the cheap 2D rect when the
+        // layer has no 3D state and we're not in 3D mode.
         const t = l.transform
-        const dxPx = (px - t.x) * W, dyPx = (py - t.y) * H
-        const r = -(t.rotation || 0)
-        const cs = Math.cos(r), sn = Math.sin(r)
-        const lx = dxPx * cs - dyPx * sn
-        const ly = dxPx * sn + dyPx * cs
         const imgMax = Math.max(l.imgW, l.imgH)
         const ps = (t.scale * cMin) / imgMax
         const sw = l.imgW * ps, sh = l.imgH * ps
-        if(Math.abs(lx) <= sw / 2 && Math.abs(ly) <= sh / 2) return { type: 'image', el: l }
+        const using3D = cameraMode === '3d' || (t.rx || 0) !== 0 || (t.ry || 0) !== 0 || (t.z || 0) !== 0
+        if(using3D){
+          const camOpts = { ...cameraRef.current, mode: cameraMode }
+          const corners = [
+            projectLayerPoint([-sw/2, -sh/2, 0], l, camOpts, cameraMode, W, H),
+            projectLayerPoint([ sw/2, -sh/2, 0], l, camOpts, cameraMode, W, H),
+            projectLayerPoint([ sw/2,  sh/2, 0], l, camOpts, cameraMode, W, H),
+            projectLayerPoint([-sw/2,  sh/2, 0], l, camOpts, cameraMode, W, H)
+          ]
+          const cx = px * W, cy = py * H
+          let inside = false
+          for(let a = 0, b = 3; a < 4; b = a++){
+            const xi = corners[a][0], yi = corners[a][1]
+            const xj = corners[b][0], yj = corners[b][1]
+            if(((yi > cy) !== (yj > cy)) && (cx < (xj - xi) * (cy - yi) / (yj - yi + 1e-9) + xi)) inside = !inside
+          }
+          if(inside) return { type: 'image', el: l }
+        } else {
+          const dxPx = (px - t.x) * W, dyPx = (py - t.y) * H
+          const r = -(t.rotation || 0)
+          const cs = Math.cos(r), sn = Math.sin(r)
+          const lx = dxPx * cs - dyPx * sn
+          const ly = dxPx * sn + dyPx * cs
+          if(Math.abs(lx) <= sw / 2 && Math.abs(ly) <= sh / 2) return { type: 'image', el: l }
+        }
       }
     }
     return null
@@ -1654,9 +1726,20 @@ export default function App(){
     const t = l.transform
     const imgMax = Math.max(l.imgW, l.imgH)
     const ps = (t.scale * cMin) / imgMax
+    const sw = l.imgW * ps, sh = l.imgH * ps
+    // Project the four sprite corners through the actual sprite vertex pipeline
+    // so the selection outline tracks 3D camera + tilt + perspective exactly.
+    const camOpts = { ...camera, mode: cameraMode }
+    const corners = [
+      projectLayerPoint([-sw/2, -sh/2, 0], l, camOpts, cameraMode, W, H),
+      projectLayerPoint([ sw/2, -sh/2, 0], l, camOpts, cameraMode, W, H),
+      projectLayerPoint([ sw/2,  sh/2, 0], l, camOpts, cameraMode, W, H),
+      projectLayerPoint([-sw/2,  sh/2, 0], l, camOpts, cameraMode, W, H)
+    ]
     return { kind: 'image', left: t.x * W, top: t.y * H,
-      width: l.imgW * ps, height: l.imgH * ps, rotation: t.rotation || 0 }
-  }, [selectedUid, layers, resizeTick, aspect])
+      width: sw, height: sh, rotation: t.rotation || 0,
+      corners }
+  }, [selectedUid, layers, resizeTick, aspect, camera, cameraMode])
 
   // Orientation gizmo for the selected element: three colored axis arrows
   // projected through the same matrix as the sprite. Updates every frame in
@@ -1698,14 +1781,24 @@ export default function App(){
   const grouped = useMemo(() => {
     const q = search.trim().toLowerCase()
     const g = {}
+    const favs = []
     for(const id of Object.keys(EFFECTS)){
       const e = EFFECTS[id]
       if(q && !e.label.toLowerCase().includes(q) && !e.group.toLowerCase().includes(q)) continue
+      if(favorites.has(id)) favs.push(e)
       if(!g[e.group]) g[e.group] = []
       g[e.group].push(e)
     }
+    if(favs.length) g['★ FAVORITES'] = favs
     return g
-  }, [search])
+  }, [search, favorites])
+
+  const orderedGroups = useMemo(() => {
+    const out = []
+    if(grouped['★ FAVORITES']) out.push('★ FAVORITES')
+    for(const g of GROUPS) if(grouped[g]) out.push(g)
+    return out
+  }, [grouped])
 
   const sel = layers.find(l => l.uid === selectedUid)
   const selEffect = sel?.type === 'effect' ? EFFECTS[sel.effectId] : null
@@ -1879,31 +1972,37 @@ export default function App(){
           <input placeholder="search effects..." value={search} onChange={(e) => setSearch(e.target.value)} />
         </div>
 
-        {GROUPS.map((grp) => grouped[grp] && (
+        {orderedGroups.map((grp) => (
           <div className={'cat-group ' + (collapsedCats.has(grp) && !search ? 'collapsed' : 'open')} key={grp}>
             <button className="cat-h" onClick={() => toggleCat(grp)}>
               <span className="disclose">{collapsedCats.has(grp) && !search ? '▸' : '▾'}</span>
-              <span className="cat-badge">{grp[0]}</span>
+              <span className="cat-badge">{grp.startsWith('★') ? '★' : grp[0]}</span>
               <span className="cat-name">{grp}</span>
               <span className="cat-count">{grouped[grp].length}</span>
             </button>
             {(!collapsedCats.has(grp) || search) && (
               <div className="cat-list">
-                {grouped[grp].map((e) => (
-                  <div key={e.id} className="cat-item"
-                    role="button"
-                    tabIndex={0}
-                    draggable="true"
-                    onDragStart={(ev) => onEffectDragStart(ev, e.id)}
-                    onDragEnd={onEffectDragEnd}
-                    onClick={() => addEffect(e.id)}
-                    onKeyDown={(ev) => { if(ev.key === 'Enter' || ev.key === ' ') addEffect(e.id) }}
-                    title="click to add globally · drag onto a layer to scope it">
-                    <span className="cat-item-grip" aria-hidden>⋮⋮</span>
-                    <span className="cat-item-label">{e.label}</span>
-                    <span className="add">+</span>
-                  </div>
-                ))}
+                {grouped[grp].map((e) => {
+                  const fav = favorites.has(e.id)
+                  return (
+                    <div key={`${grp}-${e.id}`} className="cat-item"
+                      role="button"
+                      tabIndex={0}
+                      draggable="true"
+                      onDragStart={(ev) => onEffectDragStart(ev, e.id)}
+                      onDragEnd={onEffectDragEnd}
+                      onClick={() => addEffect(e.id)}
+                      onKeyDown={(ev) => { if(ev.key === 'Enter' || ev.key === ' ') addEffect(e.id) }}
+                      title="click to add · drag onto a layer to scope · ★ to favorite">
+                      <span className="cat-item-grip" aria-hidden>⋮⋮</span>
+                      <button className={'fav-star ' + (fav ? 'on' : '')}
+                        onClick={(ev) => { ev.stopPropagation(); toggleFavorite(e.id) }}
+                        title={fav ? 'remove from favorites' : 'add to favorites'}>{fav ? '★' : '☆'}</button>
+                      <span className="cat-item-label">{e.label}</span>
+                      <span className="add">+</span>
+                    </div>
+                  )
+                })}
               </div>
             )}
           </div>
@@ -1991,11 +2090,21 @@ export default function App(){
           {selectionBox && tool === 'select' && (
             <>
               {selectionBox.kind === 'image' ? (
-                <div className="selection-box"
-                  style={{ left: selectionBox.left, top: selectionBox.top, width: selectionBox.width, height: selectionBox.height,
-                    transform: `translate(-50%, -50%) rotate(${selectionBox.rotation}rad)` }}>
-                  <span className="h1" /><span className="h2" />
-                </div>
+                // 3D-aware: draw the actual projected quad as an SVG polygon.
+                <svg className="selection-poly" width={wrapW} height={wrapH}
+                  style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 4 }}>
+                  <polygon
+                    points={selectionBox.corners.map(p => `${p[0]},${p[1]}`).join(' ')}
+                    fill="none"
+                    stroke="#ffffff"
+                    strokeWidth="1.5"
+                    strokeDasharray="6 4"
+                    style={{ filter: 'drop-shadow(0 0 1px rgba(0,0,0,0.6))' }} />
+                  {selectionBox.corners.map((p, i) => (
+                    <rect key={i} x={p[0] - 4} y={p[1] - 4} width="8" height="8"
+                      fill="#ffffff" stroke="#000000" strokeWidth="1" />
+                  ))}
+                </svg>
               ) : (
                 <>
                   <div className="selection-box-shape"
@@ -2008,6 +2117,23 @@ export default function App(){
               )}
             </>
           )}
+
+          {/* Mask preview circle — visualize the cursor mask of the selected effect */}
+          {sel?.type === 'effect' && sel.mask?.on && (() => {
+            const ar = wrapW / wrapH
+            const arX = ar > 1 ? 1 : ar
+            const arY = ar > 1 ? 1 / ar : 1
+            const cx = mouseTargetRef.current.x * wrapW
+            const cy = (1 - mouseTargetRef.current.y) * wrapH
+            const rPx = sel.mask.radius * Math.max(wrapW, wrapH)
+            return (
+              <svg className="mask-overlay" width={wrapW} height={wrapH}
+                style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 4 }}>
+                <circle cx={cx} cy={cy} r={rPx} fill="none" stroke="rgba(255,255,255,0.85)" strokeWidth="1" strokeDasharray="4 3" />
+                <circle cx={cx} cy={cy} r={Math.max(rPx * (1 - sel.mask.softness), 1)} fill="none" stroke="rgba(255,255,255,0.45)" strokeWidth="0.8" />
+              </svg>
+            )
+          })()}
 
           {/* Orientation gizmo — only in 3D mode */}
           {axisGizmo && tool === 'select' && cameraMode === '3d' && (

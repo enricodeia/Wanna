@@ -1340,6 +1340,22 @@ button{ background: none; border: 0; cursor: pointer; padding: 0; color: inherit
   opacity: 0.5;
 }
 .cat-item:hover .cat-item-grip{ color: var(--paper); opacity: 1; }
+.fav-star{
+  font-size: 14px;
+  width: 16px;
+  text-align: center;
+  background: transparent;
+  border: 0;
+  color: var(--muted-2);
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.fav-star.on{ color: #f5b400; }
+.fav-star:hover{ color: #f5b400; }
+.cat-item:hover .fav-star{ color: var(--paper); }
+.cat-item:hover .fav-star.on{ color: #f5b400; }
 
 /* Drop highlight when dragging an effect onto a layer card */
 .layer.fx-drop-target{

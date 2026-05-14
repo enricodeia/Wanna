@@ -841,11 +841,17 @@ export function createEngine(canvas){
   }
 
   // Re-upload a layer's HTMLVideoElement frame into its GL texture so the texture
-  // tracks the video playback. Called once per frame for video layers.
+  // tracks the video playback. Called once per frame for video layers. Uses
+  // LINEAR (no mipmap) since the texture changes every frame and the original
+  // mipmap chain — built from the 1x1 placeholder — would otherwise be stale
+  // and the GPU would sample undefined / black pixels.
   function refreshVideoTexture(layer){
     const v = layer._video
-    if(!v || v.readyState < 2 || v.paused) return
+    if(!v) return
+    // Texture must exist
     if(!layer.tex || !layer.tex.tex) return
+    // Wait until first frame is decoded
+    if(v.readyState < 2) return
     if(v.videoWidth && (layer.imgW !== v.videoWidth || layer.imgH !== v.videoHeight)){
       layer.imgW = v.videoWidth
       layer.imgH = v.videoHeight
@@ -856,6 +862,13 @@ export function createEngine(canvas){
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, v)
     } catch(_){}
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
+    if(!layer._videoFiltersSet){
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+      layer._videoFiltersSet = true
+    }
   }
 
   function drawLayerOntoBound(layer){
