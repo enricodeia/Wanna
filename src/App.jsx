@@ -560,25 +560,53 @@ export default function App(){
       gs.x += (target.x - gs.x) * DEFAULT_FOLLOW.momentum
       gs.y += (target.y - gs.y) * DEFAULT_FOLLOW.momentum
 
-      // Build layers-for-render with follow applied
+      // Build layers-for-render. Two cursor-driven behaviors are applied here:
+      //   - effect cursor follow: feeds smoothed cursor x/y into the effect's
+      //     followCursor uniforms (if it declares them).
+      //   - sprite/shape look-at: rotates the layer's rx/ry so it tilts to
+      //     "look at" the cursor, with momentum smoothing.
       const layersForRender = stateRef.current.map(l => {
-        if(!l._follow) return l
-        const f = l._followCfg || DEFAULT_FOLLOW
-        const s = updateSmooth(l.uid, f)
-        if(l.type === 'effect'){
+        let next = l
+        // ---- effect cursor follow (drives shader uniforms) ----
+        if(l.type === 'effect' && l._follow){
+          const f = l._followCfg || DEFAULT_FOLLOW
+          const s = updateSmooth(l.uid, f)
           const fx = EFFECTS[l.effectId]
-          if(!fx?.followCursor) return l
-          const v = { ...l.values }
-          if(fx.followCursor[0]) v[fx.followCursor[0]] = s.x
-          if(fx.followCursor[1]) v[fx.followCursor[1]] = 1 - s.y
-          return { ...l, values: v }
+          if(fx?.followCursor){
+            const v = { ...l.values }
+            if(fx.followCursor[0]) v[fx.followCursor[0]] = s.x
+            if(fx.followCursor[1]) v[fx.followCursor[1]] = 1 - s.y
+            next = { ...next, values: v }
+          }
         }
-        const cx = s.x, cy = 1 - s.y
-        if(l.type === 'shape'){
-          const [scX, scY] = shapeCentroid(l.points)
-          return { ...l, x: cx - scX, y: cy - scY }
+        // ---- sprite / shape look-at (rotates rx / ry toward cursor) ----
+        if(l.type !== 'effect' && l._lookAt){
+          const cfg = l._lookAtCfg || { momentum: 0.18, intensity: 1 }
+          let s = followStateRef.current.get('look:' + l.uid)
+          if(!s){ s = { x: 0.5, y: 0.5 }; followStateRef.current.set('look:' + l.uid, s) }
+          s.x += (target.x - s.x) * cfg.momentum
+          s.y += (target.y - s.y) * cfg.momentum
+          let cx0, cy0
+          if(l.type === 'shape'){
+            const [scX, scY] = shapeCentroid(l.points)
+            cx0 = (l.x || 0) + scX
+            cy0 = (l.y || 0) + scY
+          } else {
+            cx0 = l.transform.x
+            cy0 = l.transform.y
+          }
+          const dx = s.x - cx0
+          const dy = (1 - s.y) - cy0
+          const k = (cfg.intensity || 1)
+          const ry = Math.atan(dx * 3) * k
+          const rx = -Math.atan(dy * 3) * k
+          if(l.type === 'shape'){
+            next = { ...next, rx, ry }
+          } else {
+            next = { ...next, transform: { ...next.transform, rx, ry } }
+          }
         }
-        return { ...l, transform: { ...l.transform, x: cx, y: cy } }
+        return next
       })
 
       eng.render({
@@ -863,6 +891,16 @@ export default function App(){
   const updateLayerFollowCfg = (uid, key, value) => {
     setLayers((s) => s.map(l => l.uid === uid ? {
       ...l, _followCfg: { ...(l._followCfg || DEFAULT_FOLLOW), [key]: value }
+    } : l))
+  }
+  const toggleLayerLookAt = (uid) => {
+    setLayers((s) => s.map(l => l.uid === uid ? {
+      ...l, _lookAt: !l._lookAt, _lookAtCfg: l._lookAtCfg || { momentum: 0.18, intensity: 1 }
+    } : l))
+  }
+  const updateLayerLookAtCfg = (uid, key, value) => {
+    setLayers((s) => s.map(l => l.uid === uid ? {
+      ...l, _lookAtCfg: { ...(l._lookAtCfg || { momentum: 0.18, intensity: 1 }), [key]: value }
     } : l))
   }
   const updateImageTransform = (uid, key, value) => {
@@ -1572,7 +1610,13 @@ export default function App(){
           </div>
           <div className="tools cam-toggle">
             <button className={'tool-btn ' + (cameraMode === '2d' ? 'on' : '')} onClick={() => setCameraMode('2d')} title="2D canvas">2D</button>
-            <button className={'tool-btn ' + (cameraMode === '3d' ? 'on' : '')} onClick={() => setCameraMode('3d')} title="3D scene · drag empty canvas to orbit">3D</button>
+            <button className={'tool-btn ' + (cameraMode === '3d' ? 'on' : '')}
+              onClick={() => {
+                setCameraMode('3d')
+                // Seed a useful pose so the floor grid is immediately visible.
+                if(camera.yaw === 0 && camera.pitch === 0) setCamera({ yaw: 0.35, pitch: 0.45, zoom: 0.92 })
+              }}
+              title="3D scene · drag empty canvas to orbit">3D</button>
           </div>
           <div className="tools aspect-toggle">
             {ASPECTS.map((x) => (
@@ -2141,11 +2185,20 @@ export default function App(){
                   <div className="row-btns">
                     <button className="mini-btn" onClick={() => centerLayer(sel.uid)}>center</button>
                     <button className="mini-btn" onClick={() => resetLayer(sel.uid)}>reset</button>
-                    <button className={'mini-btn ' + (sel._follow ? 'on' : '')} onClick={() => toggleLayerFollow(sel.uid)}>
-                      ⊙ follow cursor
+                    <button className={'mini-btn ' + (sel._lookAt ? 'on' : '')} onClick={() => toggleLayerLookAt(sel.uid)}>
+                      look at cursor
                     </button>
                   </div>
-                  {sel._follow && <FollowControls uid={sel.uid} cfg={sel._followCfg} />}
+                  {sel._lookAt && (
+                    <div className="follow-controls">
+                      <ParamControl param={{ key:'momentum', label:'look momentum', type:'range', min:0.02, max:0.5, step:0.001, default:0.18 }}
+                        value={(sel._lookAtCfg || {}).momentum ?? 0.18}
+                        onChange={(v) => updateLayerLookAtCfg(sel.uid, 'momentum', v)} />
+                      <ParamControl param={{ key:'intensity', label:'look intensity', type:'range', min:0, max:2, step:0.01, default:1 }}
+                        value={(sel._lookAtCfg || {}).intensity ?? 1}
+                        onChange={(v) => updateLayerLookAtCfg(sel.uid, 'intensity', v)} />
+                    </div>
+                  )}
                 </>
               )}
             </div>

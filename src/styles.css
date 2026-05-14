@@ -41,9 +41,9 @@ button{ background: none; border: 0; cursor: pointer; padding: 0; color: inherit
 /* ============ Top bar ============ */
 .topbar{
   grid-column: 1 / -1;
-  display: flex;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
   align-items: center;
-  justify-content: space-between;
   padding: 0 16px;
   border-bottom: 1px solid var(--line-strong);
   background: var(--paper);
@@ -61,11 +61,17 @@ button{ background: none; border: 0; cursor: pointer; padding: 0; color: inherit
 .brand-svg{ display: block; }
 
 .center-toolbar{
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: 12px;
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
 }
+.center-toolbar > .tools:first-child{ justify-self: start; }
+.center-toolbar > .cam-toggle{ justify-self: center; }
+.center-toolbar > .aspect-toggle{ justify-self: end; }
 .tools{
   display: flex;
   gap: 0;

@@ -262,6 +262,50 @@ void main(){
   o = mix(orig, effected, maskValue);
 }`
 
+// Scene grid + axes: thin colored lines drawn in world space, transformed by
+// the same camera as sprites. Used as a visual horizon when 3D mode is on.
+const GRID_VS = `#version 300 es
+in vec3 a_pos;
+in vec3 a_color;
+uniform vec2 u_canvasSize;
+uniform float u_camYaw;
+uniform float u_camPitch;
+uniform float u_camZoom;
+uniform float u_perspective;
+uniform vec2 u_anchor;        // canvas center
+out vec3 v_color;
+out float v_alpha;
+void main(){
+  vec3 p = a_pos;
+  // Camera orbit around canvas center
+  float cy = cos(u_camYaw), sy = sin(u_camYaw);
+  p = mat3(cy, 0.0, sy,  0.0, 1.0, 0.0,  -sy, 0.0, cy) * p;
+  float cp = cos(u_camPitch), sp = sin(u_camPitch);
+  p = mat3(1.0, 0.0, 0.0,  0.0, cp, -sp,  0.0, sp, cp) * p;
+  p.xy *= u_camZoom;
+  // Distance fade so far-away grid cells dim out to nothing
+  v_alpha = 1.0 - clamp(length(a_pos) / 2200.0, 0.0, 1.0);
+  v_color = a_color;
+  // Place around canvas center
+  p.xy += u_anchor;
+  // Bounded perspective (matches sprite shader)
+  float strength = max(u_perspective, 0.001);
+  float focal = 1400.0 / strength;
+  float denom = max(focal - p.z, 80.0);
+  float persp = focal / denom;
+  p.xy = (p.xy - u_anchor) * persp + u_anchor;
+  vec2 ndc = (p.xy / u_canvasSize) * 2.0 - 1.0;
+  gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
+}`
+
+const GRID_FS = `#version 300 es
+precision highp float;
+in vec3 v_color;
+in float v_alpha;
+uniform float u_intensity;
+out vec4 o;
+void main(){ o = vec4(v_color, u_intensity * v_alpha); }`
+
 // Background: fullscreen quad shader for solid / linear / radial / conic gradients.
 const BG_FS = `#version 300 es
 precision highp float;
@@ -497,6 +541,66 @@ export function createEngine(canvas){
   const compU = uniforms(gl, compProg)
   const bgProg = linkProgram(gl, FULLSCREEN_VS, BG_FS, ['a_pos'])
   const bgU = uniforms(gl, bgProg)
+
+  // ============ 3D scene grid ============
+  const gridProg = linkProgram(gl, GRID_VS, GRID_FS, ['a_pos', 'a_color'])
+  const gridU = uniforms(gl, gridProg)
+  const gridVAO = gl.createVertexArray()
+  gl.bindVertexArray(gridVAO)
+  const gridBuf = gl.createBuffer()
+  gl.bindBuffer(gl.ARRAY_BUFFER, gridBuf)
+  // pos.xyz, color.rgb interleaved (24 bytes per vertex)
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0)
+  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12)
+  let gridVertexCount = 0
+  let gridLastSize = 0
+  function ensureGridBuffer(){
+    const canvasMin = Math.min(W, H)
+    if(canvasMin === gridLastSize) return
+    gridLastSize = canvasMin
+    const cell = canvasMin * 0.1
+    const half = canvasMin * 1.6
+    const lines = []
+    const grey = [0.55, 0.55, 0.55]
+    const greyDim = [0.32, 0.32, 0.32]
+    const N = 16
+    for(let i = -N; i <= N; i++){
+      if(i === 0) continue // skip center grid lines — axes will draw them
+      const x = i * cell
+      const c = (i % 5 === 0) ? grey : greyDim
+      lines.push(x, 0, -half, ...c,  x, 0, half, ...c)
+      lines.push(-half, 0, x, ...c,  half, 0, x, ...c)
+    }
+    // Axes: X red, Z blue, Y green
+    const axisLen = canvasMin * 1.0
+    lines.push(-axisLen, 0, 0,  0.95, 0.18, 0.30,   axisLen, 0, 0,  0.95, 0.18, 0.30) // X
+    lines.push(0, 0, -axisLen,  0.20, 0.55, 1.00,   0, 0, axisLen,  0.20, 0.55, 1.00) // Z
+    lines.push(0, -axisLen, 0,  0.30, 0.95, 0.45,   0, axisLen, 0,  0.30, 0.95, 0.45) // Y
+    const arr = new Float32Array(lines)
+    gl.bindVertexArray(gridVAO)
+    gl.bindBuffer(gl.ARRAY_BUFFER, gridBuf)
+    gl.bufferData(gl.ARRAY_BUFFER, arr, gl.STATIC_DRAW)
+    gridVertexCount = arr.length / 6
+  }
+  function drawSceneGrid(intensity){
+    ensureGridBuffer()
+    if(!gridVertexCount) return
+    const cam = currentCam || { yaw: 0, pitch: 0, zoom: 1 }
+    gl.useProgram(gridProg)
+    gl.bindVertexArray(gridVAO)
+    if(gridU.u_canvasSize) gl.uniform2f(gridU.u_canvasSize, W, H)
+    if(gridU.u_anchor)     gl.uniform2f(gridU.u_anchor, W * 0.5, H * 0.5)
+    if(gridU.u_camYaw)     gl.uniform1f(gridU.u_camYaw, cam.yaw || 0)
+    if(gridU.u_camPitch)   gl.uniform1f(gridU.u_camPitch, cam.pitch || 0)
+    if(gridU.u_camZoom)    gl.uniform1f(gridU.u_camZoom, cam.zoom != null ? cam.zoom : 1)
+    if(gridU.u_perspective) gl.uniform1f(gridU.u_perspective, 1.0)
+    if(gridU.u_intensity)  gl.uniform1f(gridU.u_intensity, intensity)
+    gl.enable(gl.BLEND)
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+    gl.lineWidth(1)
+    gl.drawArrays(gl.LINES, 0, gridVertexCount)
+    gl.disable(gl.BLEND)
+  }
 
   const effectPrograms = new Map()
   let W = 0, H = 0
@@ -785,6 +889,13 @@ export function createEngine(canvas){
       if(bgU.u_bgAngle) gl.uniform1f(bgU.u_bgAngle, bg.angle != null ? bg.angle : 90)
       if(bgU.u_bgRadius) gl.uniform1f(bgU.u_bgRadius, bg.radius != null ? bg.radius : 0.7)
       gl.drawArrays(gl.TRIANGLES, 0, 3)
+    }
+
+    // 3D scene grid + axes — only when the camera is in 3D mode.
+    if(currentCam && currentCam.mode === '3d'){
+      // Auto-pitch the floor a bit so a flat (yaw=0, pitch=0) view still shows
+      // the horizon. The user's pitch is added in drawSceneGrid via cam.pitch.
+      drawSceneGrid(0.85)
     }
 
     for(const layer of layers){
