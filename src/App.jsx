@@ -152,23 +152,93 @@ const ensureGoogleFont = (family) => {
 }
 const fontFamilyCss = (family) => family ? `"${family}", system-ui, sans-serif` : 'Inter, system-ui, sans-serif'
 
-const renderTextToCanvas = (text, font = 'Inter, system-ui, sans-serif', size = 96, color = [0, 0, 0], bold = true) => {
+// Full-featured text canvas renderer. Used both for layer creation (commitText)
+// and for live updates (updateText). Supports weight, italic, letter-spacing,
+// stroke (outline), fill mode.
+const renderTextToCanvas = (text, opts = {}) => {
+  const {
+    fontFamily = 'Inter',
+    size = 96,
+    color = [0, 0, 0],
+    weight = 700,
+    italic = false,
+    letterSpacing = 0,        // em
+    strokeColor = [0, 0, 0],
+    strokeWidth = 0,          // px
+    fillEnabled = true
+  } = opts
+  const fontCss = `"${fontFamily}", system-ui, sans-serif`
+  const styleStr = italic ? 'italic ' : ''
+  const tmp = document.createElement('canvas').getContext('2d')
+  tmp.font = `${styleStr}${weight} ${size}px ${fontCss}`
+  const safeText = text || ' '
+  const chars = [...safeText]
+  const ls = letterSpacing * size
+  let textW = 0
+  for(const ch of chars){
+    textW += tmp.measureText(ch).width + ls
+  }
+  textW -= ls
+  const pad = Math.max(24, strokeWidth + 12)
+  const w = Math.max(8, Math.ceil(textW)) + pad * 2
+  const h = Math.ceil(size * 1.6)
   const c = document.createElement('canvas')
-  const tmp = c.getContext('2d')
-  tmp.font = `${bold ? '700 ' : ''}${size}px ${font}`
-  const m = tmp.measureText(text || ' ')
-  const w = Math.max(8, Math.ceil(m.width)) + 24
-  const h = Math.ceil(size * 1.5)
   c.width = w; c.height = h
   const ctx = c.getContext('2d')
-  ctx.font = `${bold ? '700 ' : ''}${size}px ${font}`
-  ctx.fillStyle = `rgb(${Math.round(color[0]*255)}, ${Math.round(color[1]*255)}, ${Math.round(color[2]*255)})`
+  ctx.font = `${styleStr}${weight} ${size}px ${fontCss}`
   ctx.textBaseline = 'middle'
-  ctx.fillText(text, 12, h / 2)
+  ctx.textAlign = 'left'
+  const rgb = (v) => `rgb(${Math.round(v[0]*255)}, ${Math.round(v[1]*255)}, ${Math.round(v[2]*255)})`
+  ctx.fillStyle = rgb(color)
+  ctx.strokeStyle = rgb(strokeColor)
+  ctx.lineWidth = Math.max(0, strokeWidth)
+  ctx.lineJoin = 'round'
+  let x = pad
+  for(const ch of chars){
+    if(strokeWidth > 0) ctx.strokeText(ch, x, h / 2)
+    if(fillEnabled) ctx.fillText(ch, x, h / 2)
+    x += tmp.measureText(ch).width + ls
+  }
   return c
 }
 const rgb2hex = (c) => '#' + c.map(x => Math.round(Math.max(0, Math.min(1, x)) * 255).toString(16).padStart(2, '0')).join('')
 const hex2rgb = (h) => { const s = h.replace('#', ''); return [parseInt(s.slice(0,2),16)/255, parseInt(s.slice(2,4),16)/255, parseInt(s.slice(4,6),16)/255] }
+
+// Dedicated text-input overlay so we can drive focus explicitly via a ref
+// (autoFocus alone can be fragile when the input mounts during the same
+// pointer event that created it). Commit on Enter / blur / ✓ button.
+function TextDraftInput({ draft, wrapW, wrapH, onChange, onCommit, onCancel }){
+  const inputRef = useRef(null)
+  useEffect(() => {
+    const el = inputRef.current
+    if(!el) return
+    const t = setTimeout(() => { el.focus(); el.select() }, 0)
+    return () => clearTimeout(t)
+  }, [])
+  const submit = () => {
+    if((draft.value || '').trim()) onCommit()
+    else onCancel()
+  }
+  return (
+    <div className="text-input-overlay"
+      style={{ left: draft.x * wrapW, top: draft.y * wrapH }}
+      onPointerDown={(e) => e.stopPropagation()}>
+      <input
+        ref={inputRef}
+        type="text"
+        value={draft.value}
+        placeholder="type your text — Enter to commit · Esc to cancel"
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if(e.key === 'Enter'){ e.preventDefault(); submit() }
+          else if(e.key === 'Escape'){ e.preventDefault(); onCancel() }
+        }}
+        onBlur={submit}
+      />
+      <button className="text-commit-btn" onMouseDown={(e) => { e.preventDefault(); submit() }} title="commit (Enter)">↵</button>
+    </div>
+  )
+}
 
 function ShapeThumb({ shape }){
   const points = shape.points
@@ -674,7 +744,17 @@ export default function App(){
       if(l.uid !== uid || l.type !== 'text') return l
       const updated = { ...l, [key]: value }
       if(key === 'fontFamily' && value) ensureGoogleFont(value)
-      const c = renderTextToCanvas(updated.text, fontFamilyCss(updated.fontFamily), updated.size, updated.color)
+      const c = renderTextToCanvas(updated.text, {
+        fontFamily: updated.fontFamily,
+        size: updated.size,
+        color: updated.color,
+        weight: updated.weight,
+        italic: updated.italic,
+        letterSpacing: updated.letterSpacing,
+        strokeColor: updated.strokeColor,
+        strokeWidth: updated.strokeWidth,
+        fillEnabled: updated.fillEnabled !== false
+      })
       if(engineRef.current){
         if(updated.tex) engineRef.current.deleteTexture(updated.tex)
         updated.tex = engineRef.current.uploadTexture(c)
@@ -968,13 +1048,20 @@ export default function App(){
     if(!engineRef.current) return
     const fontFamily = textDraft.fontFamily || 'Inter'
     ensureGoogleFont(fontFamily)
-    const canvas = renderTextToCanvas(textDraft.value, fontFamilyCss(fontFamily), 96, [0, 0, 0])
+    const canvas = renderTextToCanvas(textDraft.value, {
+      fontFamily, size: 96, color: [0, 0, 0],
+      weight: 700, italic: false, letterSpacing: 0,
+      strokeColor: [0, 0, 0], strokeWidth: 0, fillEnabled: true
+    })
     const tex = engineRef.current.uploadTexture(canvas)
     setLayers((s) => {
       const layer = {
         uid: crypto.randomUUID(), type: 'text',
         name: textDraft.value.slice(0, 24),
-        text: textDraft.value, fontFamily, size: 96, color: [0, 0, 0],
+        text: textDraft.value,
+        fontFamily, size: 96, color: [0, 0, 0],
+        weight: 700, italic: false, letterSpacing: 0,
+        strokeColor: [0, 0, 0], strokeWidth: 0, fillEnabled: true,
         tex, imgW: canvas.width, imgH: canvas.height,
         thumbnail: canvas.toDataURL('image/png'),
         visible: true, _follow: false,
@@ -1504,16 +1591,14 @@ export default function App(){
           )}
 
           {textDraft && (
-            <div className="text-input-overlay" style={{ left: textDraft.x * wrapW, top: textDraft.y * wrapH }}>
-              <input autoFocus type="text" value={textDraft.value}
-                placeholder="type · enter · esc"
-                onChange={(e) => setTextDraft(d => ({...d, value: e.target.value}))}
-                onKeyDown={(e) => {
-                  if(e.key === 'Enter') { e.preventDefault(); commitText() }
-                  if(e.key === 'Escape') { e.preventDefault(); setTextDraft(null) }
-                }}
-                onBlur={() => { if(textDraft.value.trim()) commitText(); else setTextDraft(null) }} />
-            </div>
+            <TextDraftInput
+              draft={textDraft}
+              wrapW={wrapW}
+              wrapH={wrapH}
+              onChange={(value) => setTextDraft(d => ({ ...d, value }))}
+              onCommit={commitText}
+              onCancel={() => setTextDraft(null)}
+            />
           )}
 
           <div className="canvas-coords">{aspect}</div>
@@ -1547,7 +1632,6 @@ export default function App(){
             const i = layers.length - 1 - displayIdx
             const ll = layers[i]
             const fx = ll.type === 'effect' ? EFFECTS[ll.effectId] : null
-            const followable = ll.type !== 'effect' || (fx && fx.followCursor)
             const isOver = dragOver?.overUid === ll.uid
             return (
               <div key={ll.uid}
@@ -1572,7 +1656,6 @@ export default function App(){
                   <span className="card-line">
                     <span className="idx">{String(i + 1).padStart(2, '0')}</span>
                     <span className="type-icon">{typeBadge(ll)}</span>
-                    {ll._follow && <span className="follow-badge" title="follows cursor">⊙</span>}
                     {ll.type === 'effect' && ll.mask?.on && <span className="mask-badge" title="masked">▣</span>}
                     {ll.type === 'effect' && ll.scopedTo && <span className="scope-badge" title="scoped to layer">↳</span>}
                     {ll.blendMode && ll.blendMode !== 'normal' && <span className="blend-badge" title={`blend: ${ll.blendMode}`}>×</span>}
@@ -1598,8 +1681,21 @@ export default function App(){
                   )}
                 </div>
                 <div className="layer-actions" onClick={(e) => e.stopPropagation()}>
-                  {followable && <button className={'follow-btn ' + (ll._follow ? 'on' : '')} title="follow cursor" onClick={() => toggleLayerFollow(ll.uid)}>⊙</button>}
-                  <button title="visible"   onClick={() => toggleLayerVisible(ll.uid)}>{ll.visible ? '●' : '○'}</button>
+                  <button title={ll.visible ? 'hide' : 'show'} className="eye-btn"
+                    onClick={() => toggleLayerVisible(ll.uid)}>
+                    {ll.visible ? (
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                        <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/>
+                        <circle cx="12" cy="12" r="3"/>
+                      </svg>
+                    ) : (
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-6.5 0-10-7-10-7a17.13 17.13 0 0 1 3.36-4.36"/>
+                        <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 7 10 7a17.18 17.18 0 0 1-2.16 3.19"/>
+                        <line x1="1" y1="1" x2="23" y2="23"/>
+                      </svg>
+                    )}
+                  </button>
                   <button title="duplicate" onClick={() => duplicateLayer(ll.uid)}>+</button>
                   <button title="up"        onClick={() => moveLayerZ(ll.uid, +1)}>↑</button>
                   <button title="down"      onClick={() => moveLayerZ(ll.uid, -1)}>↓</button>
@@ -1750,8 +1846,31 @@ export default function App(){
                   </div>
                   <ParamControl param={{ key: 'size', label: 'font size', type: 'range', min: 16, max: 300, step: 1, default: 96 }}
                     value={sel.size} onChange={(v) => updateText(sel.uid, 'size', v)} />
-                  <ParamControl param={{ key: 'color', label: 'color', type: 'color', default: [0,0,0] }}
+                  <ParamControl param={{ key: 'weight', label: 'weight', type: 'range', min: 100, max: 900, step: 100, default: 700 }}
+                    value={sel.weight ?? 700} onChange={(v) => updateText(sel.uid, 'weight', v)} />
+                  <div className="param">
+                    <div className="toggle">
+                      <div className={'switch ' + (sel.italic ? 'on' : '')} onClick={() => updateText(sel.uid, 'italic', !sel.italic)} />
+                      <span className="label-scrub">italic</span>
+                    </div>
+                  </div>
+                  <ParamControl param={{ key: 'letterSpacing', label: 'letter spacing', type: 'range', min: -0.1, max: 0.5, step: 0.001, default: 0 }}
+                    value={sel.letterSpacing ?? 0} onChange={(v) => updateText(sel.uid, 'letterSpacing', v)} />
+                  <ParamControl param={{ key: 'color', label: 'fill color', type: 'color', default: [0,0,0] }}
                     value={sel.color} onChange={(v) => updateText(sel.uid, 'color', v)} />
+                  <div className="param">
+                    <div className="toggle">
+                      <div className={'switch ' + (sel.fillEnabled !== false ? 'on' : '')}
+                        onClick={() => updateText(sel.uid, 'fillEnabled', sel.fillEnabled === false)} />
+                      <span className="label-scrub">fill on</span>
+                    </div>
+                  </div>
+                  <ParamControl param={{ key: 'strokeWidth', label: 'stroke width', type: 'range', min: 0, max: 30, step: 0.1, default: 0 }}
+                    value={sel.strokeWidth ?? 0} onChange={(v) => updateText(sel.uid, 'strokeWidth', v)} />
+                  {(sel.strokeWidth ?? 0) > 0 && (
+                    <ParamControl param={{ key: 'strokeColor', label: 'stroke color', type: 'color', default: [0,0,0] }}
+                      value={sel.strokeColor || [0,0,0]} onChange={(v) => updateText(sel.uid, 'strokeColor', v)} />
+                  )}
                 </>
               )}
               {sel.type === 'shape' && (

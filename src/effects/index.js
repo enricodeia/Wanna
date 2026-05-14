@@ -2264,6 +2264,7 @@ uniform float u_strokeW;        // stroke thickness in cell-fraction
 uniform float u_effectMix;
 uniform float u_showStroke;
 uniform float u_showCorners;
+uniform float u_animSpeed;      // boxes refresh / drift over time
 uniform float u_mix;
 uniform vec3  u_strokeColor;
 // 8 effect-toggle slots — disabled cells just show the bracket
@@ -2375,13 +2376,15 @@ void main(){
   vec2 inCell = fract(v_uv / cellSize);
 
   float sal = cellSaliency(cellId, cellSize);
-  float h = hash(cellId * vec2(17.3, 91.7));
+  // Time-stepped hash so the random activation pool refreshes / animates.
+  float tStep = floor(u_time * max(u_animSpeed, 0.0));
+  float h = hash(cellId * vec2(17.3, 91.7) + tStep);
   float activate = mix(sal, h, u_chaos);
 
   if(activate < u_threshold){ o = vec4(base, 1.0); return; }
 
-  // Effect index per cell — deterministic
-  float effHash = hash(cellId * vec2(31.7, 53.1));
+  // Effect index per cell — also drifts with time so different cells take turns
+  float effHash = hash(cellId * vec2(31.7, 53.1) + tStep * 0.37);
   int idx = int(floor(effHash * 8.0));
   float ena = fxEnabled(idx);
 
@@ -2448,12 +2451,13 @@ export const EFFECTS = {
   babyTrack: {
     id:'babyTrack', label:'BABY TRACK', group:'TRACKING', fs: BABY_TRACK,
     params: [
-      { key:'u_gridX',       label:'cols',          type:'range',  min:2, max:40, step:1,    default:10 },
-      { key:'u_gridY',       label:'rows',          type:'range',  min:2, max:40, step:1,    default:10 },
-      { key:'u_threshold',   label:'threshold',     type:'range',  min:0, max:1, step:0.001, default:0.18 },
-      { key:'u_chaos',       label:'chaos',         type:'range',  min:0, max:1, step:0.01,  default:0.3 },
+      { key:'u_gridX',       label:'cols',          type:'range',  min:2, max:40, step:1,    default:8 },
+      { key:'u_gridY',       label:'rows',          type:'range',  min:2, max:40, step:1,    default:8 },
+      { key:'u_threshold',   label:'threshold',     type:'range',  min:0, max:1, step:0.001, default:0.45 },
+      { key:'u_chaos',       label:'chaos',         type:'range',  min:0, max:1, step:0.01,  default:0.6 },
+      { key:'u_animSpeed',   label:'anim speed',    type:'range',  min:0, max:8, step:0.01,  default:1.2 },
       { key:'u_shape',       label:'box shape',     type:'select', options:[['rect',0],['circle',1],['diamond',2]], default:0 },
-      { key:'u_strokeW',     label:'stroke',        type:'range',  min:0, max:0.2, step:0.001, default:0.04 },
+      { key:'u_strokeW',     label:'stroke',        type:'range',  min:0, max:0.2, step:0.001, default:0.05 },
       { key:'u_strokeColor', label:'stroke color',  type:'color',  default: c(0.05, 1, 0.6) },
       { key:'u_effectMix',   label:'inside mix',    type:'range',  min:0, max:1, step:0.01, default:1 },
       { key:'u_showStroke',  label:'show stroke',   type:'toggle', default:true },

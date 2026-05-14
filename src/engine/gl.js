@@ -40,8 +40,13 @@ void main(){
   float cy = cos(u_ry), sy = sin(u_ry);
   p = mat3(cy, 0.0, sy,  0.0, 1.0, 0.0,  -sy, 0.0, cy) * p;
 
-  // Cheap one-point perspective: pull xy in/out based on z
-  float persp = 1.0 / (1.0 - p.z * u_perspective * 0.0015);
+  // One-point perspective using a focal-length formula. Bounded denominator
+  // so even hard tilts (rx/ry near +- pi/2) stay on screen instead of
+  // collapsing through the camera plane.
+  float strength = max(u_perspective, 0.001);
+  float focal = 1400.0 / strength;
+  float denom = max(focal - p.z, 80.0);
+  float persp = focal / denom;
   p.xy *= persp;
 
   vec2 wp = p.xy + u_center;
@@ -371,7 +376,11 @@ export function transformShapePoints3D(points, opts = {}){
   const cz = Math.cos(rotation), sz = Math.sin(rotation)
   const cxR = Math.cos(rx), sxR = Math.sin(rx)
   const cyR = Math.cos(ry), syR = Math.sin(ry)
-  const persp = perspective * 1.5
+  // Bounded one-point perspective. Shapes live in 0..1 space, so a focal length
+  // of ~2.0 / strength reads naturally; denom is clamped so hard tilts can't
+  // flip the polygon through the camera plane.
+  const strength = Math.max(perspective, 0.001)
+  const focal = 2.0 / strength
   const out = new Float32Array(rounded.length)
   for(let i = 0; i < rounded.length; i += 2){
     let px = (rounded[i] - cx) * scale
@@ -389,8 +398,9 @@ export function transformShapePoints3D(points, opts = {}){
     const x3 = px * cyR + pz * syR
     const z3 = -px * syR + pz * cyR
     px = x3; pz = z3
-    // Perspective
-    const k = 1.0 / (1.0 - pz * persp)
+    // Bounded perspective
+    const denom = Math.max(focal - pz, 0.05)
+    const k = focal / denom
     px *= k; py *= k
     out[i]     = px + cx + x
     out[i + 1] = py + cy + y
