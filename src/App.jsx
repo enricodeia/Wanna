@@ -29,10 +29,10 @@ const SAMPLES = [
 ]
 
 const REC_OPTIONS = [5, 10, 15, 30]
-// Billboard defaults to true so a sprite stays flat-on-screen when you orbit
-// the 3D camera (no "why is my image deforming" surprise). Turn it off in the
-// right panel to treat the layer as a real 3D plane.
-const DEFAULT_TRANSFORM = { x: 0.5, y: 0.5, z: 0, scale: 1, rotation: 0, rx: 0, ry: 0, perspective: 1, opacity: 1, billboard: true }
+// Layers are real 3D planes by default — they rotate / foreshorten with the
+// camera. Toggle "billboard" in the right panel if you want a layer to always
+// face the camera (poster-style).
+const DEFAULT_TRANSFORM = { x: 0.5, y: 0.5, z: 0, scale: 1, rotation: 0, rx: 0, ry: 0, perspective: 1, opacity: 1, billboard: false }
 // Curated Google Fonts. User can also paste custom names; we inject the <link>.
 const GOOGLE_FONTS = [
   'Inter', 'Space Grotesk', 'JetBrains Mono', 'Playfair Display', 'Bebas Neue',
@@ -127,6 +127,56 @@ function generatePrimitive(kind, cx = 0.5, cy = 0.5, size = 0.18){
     }
   }
   return pts
+}
+
+// Mirrors the sprite vertex shader on the CPU so the orientation gizmo can be
+// drawn in the SVG overlay aligned with the actual projected geometry.
+// `local` is a vec3 in the layer's local space; returns screen-pixel [x, y].
+function projectLayerPoint(local, layer, cam, cameraMode, W, H, includeLocalTilt = true){
+  const t = layer.transform || layer
+  let x = local[0], y = local[1], z = local[2]
+  // Z rotation (in-plane)
+  const cz = Math.cos(t.rotation || 0), sz = Math.sin(t.rotation || 0)
+  const x1 = x * cz - y * sz, y1 = x * sz + y * cz
+  x = x1; y = y1
+  // X / Y local tilt — for the gizmo we always include this so it visualizes
+  // the layer's "true" rotation even when billboard is on.
+  if(includeLocalTilt){
+    const cx = Math.cos(t.rx || 0), sx = Math.sin(t.rx || 0)
+    const y2 = y * cx - z * sx, z2 = y * sx + z * cx
+    y = y2; z = z2
+    const cy = Math.cos(t.ry || 0), sy = Math.sin(t.ry || 0)
+    const x3 = x * cy + z * sy, z3 = -x * sy + z * cy
+    x = x3; z = z3
+  }
+  // Place in world (canvas-pixel) space + layer z
+  x += t.x * W
+  y += t.y * H
+  z += (t.z || 0) * Math.min(W, H)
+  const ccX = W * 0.5, ccY = H * 0.5
+  if(cameraMode === '3d'){
+    x -= ccX; y -= ccY
+    const cyw = Math.cos(cam.yaw || 0), syw = Math.sin(cam.yaw || 0)
+    const xc = x * cyw + z * syw, zc = -x * syw + z * cyw
+    x = xc; z = zc
+    const cpt = Math.cos(cam.pitch || 0), spt = Math.sin(cam.pitch || 0)
+    const yc = y * cpt - z * spt, zc2 = y * spt + z * cpt
+    y = yc; z = zc2
+    const zm = cam.zoom != null ? cam.zoom : 1
+    x *= zm; y *= zm
+    x += ccX + (cam.panX || 0) * W
+    y += ccY + (cam.panY || 0) * H
+  }
+  // Bounded perspective (matches SPRITE_VS)
+  const strength = Math.max(t.perspective != null ? t.perspective : 1, 0.001)
+  const focal = (cameraMode === '3d' ? 2200 : 1400) / strength
+  const denom = Math.max(focal - z, 80)
+  const k = focal / denom
+  const pivotX = cameraMode === '3d' ? ccX : t.x * W
+  const pivotY = cameraMode === '3d' ? ccY : t.y * H
+  x = (x - pivotX) * k + pivotX
+  y = (y - pivotY) * k + pivotY
+  return [x, y]
 }
 
 // ---- 3D-MAPPING CPU previews (small thumbnails of normal / depth / roughness) ----
@@ -1583,6 +1633,43 @@ export default function App(){
       width: l.imgW * ps, height: l.imgH * ps, rotation: t.rotation || 0 }
   }, [selectedUid, layers, resizeTick, aspect])
 
+  // Orientation gizmo for the selected element: three colored axis arrows
+  // projected through the same matrix as the sprite. Updates every frame in
+  // 3D mode (because the camera state moves), so we depend on camera too.
+  const axisGizmo = useMemo(() => {
+    if(!selectedUid) return null
+    const l = layers.find(x => x.uid === selectedUid)
+    if(!l || l.type === 'effect') return null
+    const wrap = canvasRef.current?.parentElement
+    if(!wrap) return null
+    const rect = wrap.getBoundingClientRect()
+    const W = rect.width, H = rect.height
+    if(!W || !H) return null
+    const len = Math.min(W, H) * 0.18
+    const camOpts = { ...camera, mode: cameraMode }
+    // Use a 'shape-style' wrapper for shapes (they don't have .transform)
+    const layerForProj = l.type === 'shape'
+      ? { transform: { x: 0.5 + (l.x || 0) + shapeCentroid(l.points)[0] - 0.5,
+                       y: 0.5 + (l.y || 0) + shapeCentroid(l.points)[1] - 0.5,
+                       z: l.z || 0, rotation: l.rotation || 0,
+                       rx: l.rx || 0, ry: l.ry || 0,
+                       perspective: l.perspective != null ? l.perspective : 1,
+                       billboard: false } }
+      : l
+    const origin = projectLayerPoint([0, 0, 0], layerForProj, camOpts, cameraMode, W, H)
+    const xTip   = projectLayerPoint([len, 0, 0],  layerForProj, camOpts, cameraMode, W, H)
+    const yTip   = projectLayerPoint([0, -len, 0], layerForProj, camOpts, cameraMode, W, H) // up
+    const zTip   = projectLayerPoint([0, 0, len],  layerForProj, camOpts, cameraMode, W, H)
+    const t = l.transform || l
+    return {
+      ox: origin[0], oy: origin[1],
+      x: { x: xTip[0], y: xTip[1] },
+      y: { x: yTip[0], y: yTip[1] },
+      z: { x: zTip[0], y: zTip[1] },
+      rx: t.rx || 0, ry: t.ry || 0, rz: t.rotation || 0
+    }
+  }, [selectedUid, layers, camera, cameraMode, resizeTick, aspect])
+
   const grouped = useMemo(() => {
     const q = search.trim().toLowerCase()
     const g = {}
@@ -1894,6 +1981,47 @@ export default function App(){
                   ))}
                 </>
               )}
+            </>
+          )}
+
+          {/* Orientation gizmo — 3 colored axis arrows + numeric rotation badge */}
+          {axisGizmo && tool === 'select' && (
+            <>
+              <svg className="axis-gizmo" width={wrapW} height={wrapH} viewBox={`0 0 ${wrapW} ${wrapH}`} preserveAspectRatio="none">
+                <defs>
+                  <marker id="arrX" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+                    <path d="M0,0 L10,5 L0,10 z" fill="#ff3d54"/>
+                  </marker>
+                  <marker id="arrY" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+                    <path d="M0,0 L10,5 L0,10 z" fill="#5dff7a"/>
+                  </marker>
+                  <marker id="arrZ" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+                    <path d="M0,0 L10,5 L0,10 z" fill="#3da8ff"/>
+                  </marker>
+                </defs>
+                <line x1={axisGizmo.ox} y1={axisGizmo.oy} x2={axisGizmo.x.x} y2={axisGizmo.x.y}
+                  stroke="#ff3d54" strokeWidth="2.4" markerEnd="url(#arrX)"/>
+                <line x1={axisGizmo.ox} y1={axisGizmo.oy} x2={axisGizmo.y.x} y2={axisGizmo.y.y}
+                  stroke="#5dff7a" strokeWidth="2.4" markerEnd="url(#arrY)"/>
+                <line x1={axisGizmo.ox} y1={axisGizmo.oy} x2={axisGizmo.z.x} y2={axisGizmo.z.y}
+                  stroke="#3da8ff" strokeWidth="2.4" markerEnd="url(#arrZ)"/>
+                <circle cx={axisGizmo.ox} cy={axisGizmo.oy} r="3.5" fill="#fff" stroke="#000" strokeWidth="1"/>
+                <text x={axisGizmo.x.x + 6} y={axisGizmo.x.y + 4} className="gizmo-label" fill="#ff3d54">X</text>
+                <text x={axisGizmo.y.x + 6} y={axisGizmo.y.y + 4} className="gizmo-label" fill="#5dff7a">Y</text>
+                <text x={axisGizmo.z.x + 6} y={axisGizmo.z.y + 4} className="gizmo-label" fill="#3da8ff">Z</text>
+              </svg>
+              <div className="gizmo-readout" style={{ left: axisGizmo.ox, top: axisGizmo.oy }}>
+                <div><span style={{ color: '#ff3d54' }}>RX</span> {(axisGizmo.rx * 180 / Math.PI).toFixed(1)}°</div>
+                <div><span style={{ color: '#5dff7a' }}>RY</span> {(axisGizmo.ry * 180 / Math.PI).toFixed(1)}°</div>
+                <div><span style={{ color: '#3da8ff' }}>RZ</span> {(axisGizmo.rz * 180 / Math.PI).toFixed(1)}°</div>
+                {cameraMode === '3d' && (
+                  <>
+                    <div className="gizmo-sep" />
+                    <div>YAW {(camera.yaw * 180 / Math.PI).toFixed(1)}°</div>
+                    <div>PITCH {(camera.pitch * 180 / Math.PI).toFixed(1)}°</div>
+                  </>
+                )}
+              </div>
             </>
           )}
 
