@@ -9,6 +9,11 @@ void main(){
   gl_Position = vec4(a_pos, 0.0, 1.0);
 }`
 
+// Sprite vertex shader with full 3D tilt:
+//   u_rotation = z-rotation (in-plane)
+//   u_rx       = rotate around horizontal axis (forward / back tilt)
+//   u_ry       = rotate around vertical axis (left / right tilt)
+//   u_perspective = strength of one-point perspective applied after 3D rotation
 const SPRITE_VS = `#version 300 es
 in vec2 a_pos;
 in vec2 a_uv;
@@ -16,13 +21,31 @@ uniform vec2 u_canvasSize;
 uniform vec2 u_center;
 uniform vec2 u_size;
 uniform float u_rotation;
+uniform float u_rx;
+uniform float u_ry;
+uniform float u_perspective;
 out vec2 v_uv;
 void main(){
-  vec2 p = a_pos * u_size;
-  float c = cos(u_rotation), s = sin(u_rotation);
-  p = mat2(c, -s, s, c) * p;
-  p += u_center;
-  vec2 ndc = (p / u_canvasSize) * 2.0 - 1.0;
+  vec3 p = vec3(a_pos * u_size, 0.0);
+
+  // Z rotation (in-plane)
+  float cz = cos(u_rotation), sz = sin(u_rotation);
+  p = mat3(cz, -sz, 0.0,  sz, cz, 0.0,  0.0, 0.0, 1.0) * p;
+
+  // X rotation (tilt forward / back)
+  float cx = cos(u_rx), sx = sin(u_rx);
+  p = mat3(1.0, 0.0, 0.0,  0.0, cx, -sx,  0.0, sx, cx) * p;
+
+  // Y rotation (tilt left / right)
+  float cy = cos(u_ry), sy = sin(u_ry);
+  p = mat3(cy, 0.0, sy,  0.0, 1.0, 0.0,  -sy, 0.0, cy) * p;
+
+  // Cheap one-point perspective: pull xy in/out based on z
+  float persp = 1.0 / (1.0 - p.z * u_perspective * 0.0015);
+  p.xy *= persp;
+
+  vec2 wp = p.xy + u_center;
+  vec2 ndc = (wp / u_canvasSize) * 2.0 - 1.0;
   gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
   v_uv = a_uv;
 }`
@@ -320,6 +343,7 @@ export function roundPolygon(points, radius, segments = 6){
   return out
 }
 
+// 2D version (kept for hit-testing — pure z-rotation around centroid).
 export function transformShapePoints(points, { x = 0, y = 0, scale = 1, rotation = 0, cornerRadius = 0 } = {}){
   const rounded = cornerRadius > 0 ? roundPolygon(points, cornerRadius) : points.slice()
   const [cx, cy] = shapeCentroid(rounded)
@@ -328,10 +352,48 @@ export function transformShapePoints(points, { x = 0, y = 0, scale = 1, rotation
   for(let i = 0; i < rounded.length; i += 2){
     let dx = (rounded[i] - cx) * scale
     let dy = (rounded[i + 1] - cy) * scale
-    const rx = dx * cs - dy * sn
-    const ry = dx * sn + dy * cs
-    out[i]     = rx + cx + x
-    out[i + 1] = ry + cy + y
+    const rx2 = dx * cs - dy * sn
+    const ry2 = dx * sn + dy * cs
+    out[i]     = rx2 + cx + x
+    out[i + 1] = ry2 + cy + y
+  }
+  return out
+}
+
+// 3D version with rx/ry tilt + one-point perspective. Used for rendering when
+// the shape carries non-zero rx/ry; otherwise the 2D function is used.
+export function transformShapePoints3D(points, opts = {}){
+  const { x = 0, y = 0, scale = 1, rotation = 0, cornerRadius = 0,
+          rx = 0, ry = 0, perspective = 1 } = opts
+  if(!rx && !ry) return transformShapePoints(points, opts)
+  const rounded = cornerRadius > 0 ? roundPolygon(points, cornerRadius) : points.slice()
+  const [cx, cy] = shapeCentroid(rounded)
+  const cz = Math.cos(rotation), sz = Math.sin(rotation)
+  const cxR = Math.cos(rx), sxR = Math.sin(rx)
+  const cyR = Math.cos(ry), syR = Math.sin(ry)
+  const persp = perspective * 1.5
+  const out = new Float32Array(rounded.length)
+  for(let i = 0; i < rounded.length; i += 2){
+    let px = (rounded[i] - cx) * scale
+    let py = (rounded[i + 1] - cy) * scale
+    let pz = 0
+    // Z rotation
+    const x1 = px * cz - py * sz
+    const y1 = px * sz + py * cz
+    px = x1; py = y1
+    // X rotation
+    const y2 = py * cxR - pz * sxR
+    const z2 = py * sxR + pz * cxR
+    py = y2; pz = z2
+    // Y rotation
+    const x3 = px * cyR + pz * syR
+    const z3 = -px * syR + pz * cyR
+    px = x3; pz = z3
+    // Perspective
+    const k = 1.0 / (1.0 - pz * persp)
+    px *= k; py *= k
+    out[i]     = px + cx + x
+    out[i + 1] = py + cy + y
   }
   return out
 }
@@ -447,17 +509,22 @@ export function createEngine(canvas){
     gl.uniform2f(spriteU.u_size, sw, sh)
     gl.uniform2f(spriteU.u_center, t.x * W, t.y * H)
     gl.uniform1f(spriteU.u_rotation, t.rotation || 0)
+    if(spriteU.u_rx) gl.uniform1f(spriteU.u_rx, t.rx || 0)
+    if(spriteU.u_ry) gl.uniform1f(spriteU.u_ry, t.ry || 0)
+    if(spriteU.u_perspective) gl.uniform1f(spriteU.u_perspective, t.perspective != null ? t.perspective : 1)
     gl.uniform1f(spriteU.u_opacity, t.opacity == null ? 1 : t.opacity)
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
   }
 
   function drawShape(s){
     if(!s.points || s.points.length < 6) return
-    const tp = transformShapePoints(s.points, {
+    const tp = transformShapePoints3D(s.points, {
       x: s.x || 0, y: s.y || 0,
       scale: s.scale == null ? 1 : s.scale,
       rotation: s.rotation || 0,
-      cornerRadius: s.cornerRadius || 0
+      cornerRadius: s.cornerRadius || 0,
+      rx: s.rx || 0, ry: s.ry || 0,
+      perspective: s.perspective != null ? s.perspective : 1
     })
     const n = tp.length / 2
     if(n < 3) return
@@ -570,8 +637,27 @@ export function createEngine(canvas){
     return { read: r, write: w }
   }
 
+  // Re-upload a layer's HTMLVideoElement frame into its GL texture so the texture
+  // tracks the video playback. Called once per frame for video layers.
+  function refreshVideoTexture(layer){
+    const v = layer._video
+    if(!v || v.readyState < 2 || v.paused) return
+    if(!layer.tex || !layer.tex.tex) return
+    if(v.videoWidth && (layer.imgW !== v.videoWidth || layer.imgH !== v.videoHeight)){
+      layer.imgW = v.videoWidth
+      layer.imgH = v.videoHeight
+    }
+    gl.bindTexture(gl.TEXTURE_2D, layer.tex.tex)
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true)
+    try {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, v)
+    } catch(_){}
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
+  }
+
   function drawLayerOntoBound(layer){
-    if((layer.type === 'image' || layer.type === 'text') && layer.tex){
+    if((layer.type === 'image' || layer.type === 'text' || layer.type === 'video') && layer.tex){
+      if(layer.type === 'video') refreshVideoTexture(layer)
       gl.useProgram(spriteProg)
       gl.bindVertexArray(spriteVAO)
       gl.uniform2f(spriteU.u_canvasSize, W, H)

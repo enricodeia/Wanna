@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react'
-import { createEngine, transformShapePoints, shapeCentroid } from './engine/gl.js'
+import { createEngine, transformShapePoints, transformShapePoints3D, shapeCentroid } from './engine/gl.js'
 import { EFFECTS, defaultValues } from './effects/index.js'
 import ParamControl from './components/ParamControl.jsx'
 
-const GROUPS = ['3D MAPPING', 'INTERACT', 'DISTORT', 'PRINT', 'PATTERN', 'COLOR', 'LIGHT', 'STYLIZE', 'FOCUS', 'GLITCH']
+const GROUPS = ['TRACKING', '3D MAPPING', 'INTERACT', 'DISTORT', 'PRINT', 'PATTERN', 'COLOR', 'LIGHT', 'STYLIZE', 'FOCUS', 'GLITCH']
 
 const ASPECTS = [
   { id: '1:1',  w: 1, h: 1 },
@@ -29,7 +29,19 @@ const SAMPLES = [
 ]
 
 const REC_OPTIONS = [5, 10, 15, 30]
-const DEFAULT_TRANSFORM = { x: 0.5, y: 0.5, scale: 1, rotation: 0, opacity: 1 }
+const DEFAULT_TRANSFORM = { x: 0.5, y: 0.5, scale: 1, rotation: 0, rx: 0, ry: 0, perspective: 1, opacity: 1 }
+// Curated Google Fonts. User can also paste custom names; we inject the <link>.
+const GOOGLE_FONTS = [
+  'Inter', 'Space Grotesk', 'JetBrains Mono', 'Playfair Display', 'Bebas Neue',
+  'DM Sans', 'DM Serif Display', 'Manrope', 'IBM Plex Sans', 'IBM Plex Mono',
+  'Roboto', 'Roboto Mono', 'Montserrat', 'Poppins', 'Lato', 'Open Sans',
+  'Work Sans', 'Anton', 'Archivo', 'Archivo Black', 'Oswald', 'Raleway',
+  'Source Sans 3', 'Nunito', 'Quicksand', 'Karla', 'Rubik', 'Barlow',
+  'Cormorant Garamond', 'Cormorant', 'EB Garamond', 'Lora', 'Merriweather',
+  'Crimson Pro', 'Libre Caslon Text', 'Spectral', 'Fraunces', 'Syne',
+  'Major Mono Display', 'Space Mono', 'Fira Code', 'Inconsolata',
+  'Caveat', 'Pacifico', 'Permanent Marker', 'Shadows Into Light', 'Bungee'
+]
 const DEFAULT_FOLLOW = { momentum: 0.18, intensityX: 1.0, intensityY: 1.0 }
 const DEFAULT_MASK = {
   on: false, radius: 0.3, softness: 0.3, feather: 0.15, invert: false,
@@ -126,6 +138,20 @@ const generateImageThumb = (img, size = 46) => {
   try { ctx.drawImage(img, ox, oy, cw, ch) } catch(e){}
   return c.toDataURL('image/png')
 }
+// Track which Google Fonts have been injected into <head> so we don't double-load.
+const loadedGoogleFonts = new Set()
+const ensureGoogleFont = (family) => {
+  if(!family || typeof window === 'undefined') return
+  const key = family.trim()
+  if(!key || loadedGoogleFonts.has(key)) return
+  loadedGoogleFonts.add(key)
+  const link = document.createElement('link')
+  link.rel = 'stylesheet'
+  link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(key).replace(/%20/g, '+')}:wght@400;500;600;700;800;900&display=swap`
+  document.head.appendChild(link)
+}
+const fontFamilyCss = (family) => family ? `"${family}", system-ui, sans-serif` : 'Inter, system-ui, sans-serif'
+
 const renderTextToCanvas = (text, font = 'Inter, system-ui, sans-serif', size = 96, color = [0, 0, 0], bold = true) => {
   const c = document.createElement('canvas')
   const tmp = c.getContext('2d')
@@ -196,6 +222,7 @@ const layerLabel = (l) => {
 }
 const typeBadge = (l) => {
   if(l.type === 'image') return 'IMG'
+  if(l.type === 'video') return 'VID'
   if(l.type === 'shape') return 'SHP'
   if(l.type === 'text')  return 'TXT'
   if(l.type === 'effect') return 'FX'
@@ -417,9 +444,51 @@ export default function App(){
       return [...s, layer]
     })
   }
+  // Video upload — creates a layer that re-uploads its texture every frame.
+  const addVideo = (file) => {
+    if(!engineRef.current || !file) return
+    const url = URL.createObjectURL(file)
+    const video = document.createElement('video')
+    video.src = url
+    video.crossOrigin = 'anonymous'
+    video.loop = true
+    video.muted = true
+    video.playsInline = true
+    video.autoplay = true
+    video.preload = 'auto'
+    video.addEventListener('loadeddata', () => {
+      // Seed a 1x1 placeholder texture; the render loop will re-upload from the video each frame.
+      const ph = document.createElement('canvas'); ph.width = 1; ph.height = 1
+      const tex = engineRef.current.uploadTexture(ph)
+      setLayers((s) => {
+        const idx = s.length
+        const t = { ...DEFAULT_TRANSFORM,
+          x: idx === 0 ? 0.5 : 0.3 + (idx % 3) * 0.2,
+          y: idx === 0 ? 0.5 : 0.3 + Math.floor(idx / 3) * 0.2,
+          scale: idx === 0 ? 1 : 0.45
+        }
+        const layer = {
+          uid: crypto.randomUUID(), type: 'video',
+          name: file.name,
+          tex, imgW: video.videoWidth, imgH: video.videoHeight,
+          _video: video, _videoUrl: url, _playing: true,
+          thumbnail: null, visible: true, _follow: false, transform: t,
+          blendMode: 'normal'
+        }
+        setSelectedUid(layer.uid)
+        return [...s, layer]
+      })
+      video.play().catch(() => {})
+    })
+    video.addEventListener('error', () => console.warn('video load failed', file.name))
+  }
   const onUpload = async (files) => {
     if(!files) return
     for(const file of files){
+      if(file.type.startsWith('video/')){
+        addVideo(file)
+        continue
+      }
       if(!file.type.startsWith('image/')) continue
       try {
         const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' })
@@ -484,10 +553,21 @@ export default function App(){
   // ============ Layer ops ============
   // Helper: clean up any GL textures attached to a layer (sprite tex, shape image, derived effect textures).
   const disposeLayerTextures = (l) => {
-    if(!l || !engineRef.current) return
-    if(l.tex) engineRef.current.deleteTexture(l.tex)
-    if(l.imageTex) engineRef.current.deleteTexture(l.imageTex)
-    if(l._textures) for(const t of l._textures) engineRef.current.deleteTexture(t.tex)
+    if(!l) return
+    if(engineRef.current){
+      if(l.tex) engineRef.current.deleteTexture(l.tex)
+      if(l.imageTex) engineRef.current.deleteTexture(l.imageTex)
+      if(l._textures) for(const t of l._textures) engineRef.current.deleteTexture(t.tex)
+    }
+    // Tear down video element + revoke its blob URL on layer removal
+    if(l._video){
+      try { l._video.pause() } catch(_){}
+      l._video.removeAttribute('src')
+      try { l._video.load() } catch(_){}
+    }
+    if(l._videoUrl){
+      try { URL.revokeObjectURL(l._videoUrl) } catch(_){}
+    }
   }
   // Helper: run an effect's derive() and return { _textures, mergedValues }.
   // Disposes any prior textures attached to the layer first.
@@ -574,7 +654,7 @@ export default function App(){
     } : l))
   }
   const updateImageTransform = (uid, key, value) => {
-    setLayers((s) => s.map(l => l.uid === uid && (l.type === 'image' || l.type === 'text') ? {
+    setLayers((s) => s.map(l => l.uid === uid && (l.type === 'image' || l.type === 'text' || l.type === 'video') ? {
       ...l, transform: { ...l.transform, [key]: value }
     } : l))
   }
@@ -593,7 +673,8 @@ export default function App(){
     setLayers((s) => s.map(l => {
       if(l.uid !== uid || l.type !== 'text') return l
       const updated = { ...l, [key]: value }
-      const c = renderTextToCanvas(updated.text, updated.font, updated.size, updated.color)
+      if(key === 'fontFamily' && value) ensureGoogleFont(value)
+      const c = renderTextToCanvas(updated.text, fontFamilyCss(updated.fontFamily), updated.size, updated.color)
       if(engineRef.current){
         if(updated.tex) engineRef.current.deleteTexture(updated.tex)
         updated.tex = engineRef.current.uploadTexture(c)
@@ -651,7 +732,7 @@ export default function App(){
         const [scX, scY] = shapeCentroid(l.points)
         return { ...l, x: 0.5 - scX, y: 0.5 - scY }
       }
-      if(l.type === 'image' || l.type === 'text'){
+      if(l.type === 'image' || l.type === 'text' || l.type === 'video'){
         return { ...l, transform: { ...l.transform, x: 0.5, y: 0.5 } }
       }
       return l
@@ -660,8 +741,8 @@ export default function App(){
   const resetLayer = (uid) => {
     setLayers((s) => s.map(l => {
       if(l.uid !== uid) return l
-      if(l.type === 'shape') return { ...l, x: 0, y: 0, opacity: 1, scale: 1, rotation: 0, cornerRadius: 0 }
-      if(l.type === 'image' || l.type === 'text') return { ...l, transform: { ...DEFAULT_TRANSFORM } }
+      if(l.type === 'shape') return { ...l, x: 0, y: 0, opacity: 1, scale: 1, rotation: 0, rx: 0, ry: 0, cornerRadius: 0 }
+      if(l.type === 'image' || l.type === 'text' || l.type === 'video') return { ...l, transform: { ...DEFAULT_TRANSFORM } }
       if(l.type === 'effect') return { ...l, values: defaultValues(l.effectId) }
       return l
     }))
@@ -676,8 +757,9 @@ export default function App(){
         visible: true, _follow: false,
         points,
         fill: [...penColor], opacity: 1,
-        x: 0, y: 0, scale: 1, rotation: 0, cornerRadius: 0,
-        blendMode: 'normal'
+        x: 0, y: 0, scale: 1, rotation: 0, rx: 0, ry: 0, perspective: 1, cornerRadius: 0,
+        blendMode: 'normal',
+        editMode: 'scale'   // 'scale' = transform-only · 'points' = vertex editing (Figma style)
       }
       setSelectedUid(shape.uid)
       return [...s, shape]
@@ -870,7 +952,8 @@ export default function App(){
         visible: true, _follow: false,
         points: [...drawing.points],
         fill: [...penColor], opacity: 1,
-        x: 0, y: 0, scale: 1, rotation: 0, cornerRadius: 0
+        x: 0, y: 0, scale: 1, rotation: 0, rx: 0, ry: 0, perspective: 1, cornerRadius: 0,
+        editMode: 'points'   // pen-drawn shapes default to points-edit
       }
       setSelectedUid(shape.uid)
       return [...s, shape]
@@ -883,13 +966,15 @@ export default function App(){
   const commitText = () => {
     if(!textDraft || !textDraft.value.trim()){ setTextDraft(null); return }
     if(!engineRef.current) return
-    const canvas = renderTextToCanvas(textDraft.value, 'Inter, system-ui, sans-serif', 96, [0, 0, 0])
+    const fontFamily = textDraft.fontFamily || 'Inter'
+    ensureGoogleFont(fontFamily)
+    const canvas = renderTextToCanvas(textDraft.value, fontFamilyCss(fontFamily), 96, [0, 0, 0])
     const tex = engineRef.current.uploadTexture(canvas)
     setLayers((s) => {
       const layer = {
         uid: crypto.randomUUID(), type: 'text',
         name: textDraft.value.slice(0, 24),
-        text: textDraft.value, font: 'Inter, system-ui, sans-serif', size: 96, color: [0, 0, 0],
+        text: textDraft.value, fontFamily, size: 96, color: [0, 0, 0],
         tex, imgW: canvas.width, imgH: canvas.height,
         thumbnail: canvas.toDataURL('image/png'),
         visible: true, _follow: false,
@@ -970,7 +1055,8 @@ export default function App(){
     const cMin = Math.min(W, H)
     if(selectedUid){
       const sel = layers.find(e => e.uid === selectedUid)
-      if(sel && sel.type === 'shape'){
+      // Only enter vertex-edit hit detection when the shape is in 'points' mode (Figma-style).
+      if(sel && sel.type === 'shape' && sel.editMode === 'points'){
         const tp = getTransformedPoints(sel)
         for(let i = 0; i < tp.length; i += 2){
           const dxPx = (px - tp[i]) * W, dyPx = (py - tp[i+1]) * H
@@ -1118,7 +1204,7 @@ export default function App(){
       const verts = []
       for(let i = 0; i < tp.length; i += 2){
         const px = tp[i], py = tp[i+1]
-        verts.push({ x: px * W, y: py * H })
+        if(l.editMode === 'points') verts.push({ x: px * W, y: py * H })
         if(px < minX) minX = px; if(px > maxX) maxX = px
         if(py < minY) minY = py; if(py > maxY) maxY = py
       }
@@ -1237,8 +1323,8 @@ export default function App(){
           <button className="btn" disabled={!canUndo} onClick={undo} title="Undo (⌘Z)">⌘Z</button>
           <button className="btn" disabled={!canRedo} onClick={redo} title="Redo (⌘⇧Z)">⌘⇧Z</button>
           <label className="btn">
-            ADD IMAGE
-            <input type="file" accept="image/*" multiple className="upload-input" onChange={onUploadInput} />
+            ADD MEDIA
+            <input type="file" accept="image/*,video/*" multiple className="upload-input" onChange={onUploadInput} />
           </label>
           <button className="btn solid" onClick={exportPNG}>EXPORT PNG</button>
           <div className="rec-group">
@@ -1612,7 +1698,7 @@ export default function App(){
                     onChange={(e) => updateText(sel.uid, 'text', e.target.value)} />
                 </div>
               )}
-              {(sel.type === 'image' || sel.type === 'text') && (
+              {(sel.type === 'image' || sel.type === 'text' || sel.type === 'video') && (
                 <>
                   <ParamControl param={{ key: 'x', label: 'x', type: 'range', min: -0.5, max: 1.5, step: 0.001, default: 0.5 }}
                     value={sel.transform.x} onChange={(v) => updateImageTransform(sel.uid, 'x', v)} />
@@ -1620,14 +1706,48 @@ export default function App(){
                     value={sel.transform.y} onChange={(v) => updateImageTransform(sel.uid, 'y', v)} />
                   <ParamControl param={{ key: 'scale', label: 'scale', type: 'range', min: 0.05, max: 3, step: 0.001, default: 1 }}
                     value={sel.transform.scale} onChange={(v) => updateImageTransform(sel.uid, 'scale', v)} />
-                  <ParamControl param={{ key: 'rotation', label: 'rotation', type: 'range', min: -Math.PI, max: Math.PI, step: 0.001, default: 0 }}
+                  <ParamControl param={{ key: 'rotation', label: 'rotation (z)', type: 'range', min: -Math.PI, max: Math.PI, step: 0.001, default: 0 }}
                     value={sel.transform.rotation} onChange={(v) => updateImageTransform(sel.uid, 'rotation', v)} />
+                  <ParamControl param={{ key: 'rx', label: 'tilt x (rx)', type: 'range', min: -Math.PI, max: Math.PI, step: 0.001, default: 0 }}
+                    value={sel.transform.rx || 0} onChange={(v) => updateImageTransform(sel.uid, 'rx', v)} />
+                  <ParamControl param={{ key: 'ry', label: 'tilt y (ry)', type: 'range', min: -Math.PI, max: Math.PI, step: 0.001, default: 0 }}
+                    value={sel.transform.ry || 0} onChange={(v) => updateImageTransform(sel.uid, 'ry', v)} />
+                  <ParamControl param={{ key: 'perspective', label: 'perspective', type: 'range', min: 0, max: 3, step: 0.001, default: 1 }}
+                    value={sel.transform.perspective != null ? sel.transform.perspective : 1}
+                    onChange={(v) => updateImageTransform(sel.uid, 'perspective', v)} />
                   <ParamControl param={{ key: 'opacity', label: 'opacity', type: 'range', min: 0, max: 1, step: 0.01, default: 1 }}
                     value={sel.transform.opacity} onChange={(v) => updateImageTransform(sel.uid, 'opacity', v)} />
                 </>
               )}
+              {sel.type === 'video' && (
+                <>
+                  <div className="row-btns">
+                    <button className="mini-btn" onClick={() => { const v = sel._video; if(v){ if(v.paused) v.play(); else v.pause(); setLayers((s) => s.map(l => l.uid === sel.uid ? { ...l, _playing: !v.paused } : l)) } }}>
+                      {sel._video?.paused ? '▶ play' : '⏸ pause'}
+                    </button>
+                    <button className="mini-btn" onClick={() => { if(sel._video) sel._video.currentTime = 0 }}>↺ restart</button>
+                    <button className={'mini-btn ' + (sel._video?.loop ? 'on' : '')} onClick={() => { if(sel._video){ sel._video.loop = !sel._video.loop; setLayers((s) => [...s]) } }}>loop</button>
+                    <button className={'mini-btn ' + (sel._video?.muted ? '' : 'on')} onClick={() => { if(sel._video){ sel._video.muted = !sel._video.muted; setLayers((s) => [...s]) } }}>sound</button>
+                  </div>
+                </>
+              )}
               {sel.type === 'text' && (
                 <>
+                  <div className="param">
+                    <div className="param-h"><span className="label-scrub">font family</span><span className="v">{sel.fontFamily || 'Inter'}</span></div>
+                    <select className="select" value={sel.fontFamily || 'Inter'}
+                      onChange={(e) => updateText(sel.uid, 'fontFamily', e.target.value)}>
+                      {GOOGLE_FONTS.map(f => <option key={f} value={f}>{f}</option>)}
+                    </select>
+                    <input className="text-input" style={{ marginTop: 6 }} type="text"
+                      placeholder="+ paste any Google Font name and press Enter"
+                      onKeyDown={(e) => {
+                        if(e.key === 'Enter' && e.currentTarget.value.trim()){
+                          updateText(sel.uid, 'fontFamily', e.currentTarget.value.trim())
+                          e.currentTarget.value = ''
+                        }
+                      }} />
+                  </div>
                   <ParamControl param={{ key: 'size', label: 'font size', type: 'range', min: 16, max: 300, step: 1, default: 96 }}
                     value={sel.size} onChange={(v) => updateText(sel.uid, 'size', v)} />
                   <ParamControl param={{ key: 'color', label: 'color', type: 'color', default: [0,0,0] }}
@@ -1636,14 +1756,27 @@ export default function App(){
               )}
               {sel.type === 'shape' && (
                 <>
+                  <div className="row-btns" style={{ paddingTop: 0, marginBottom: 8 }}>
+                    <button className={'mini-btn ' + ((sel.editMode || 'scale') === 'scale' ? 'on' : '')}
+                      onClick={() => updateShapeField(sel.uid, 'editMode', 'scale')}>scale mode</button>
+                    <button className={'mini-btn ' + (sel.editMode === 'points' ? 'on' : '')}
+                      onClick={() => updateShapeField(sel.uid, 'editMode', 'points')}>edit points</button>
+                  </div>
                   <ParamControl param={{ key: 'x', label: 'offset x', type: 'range', min: -1, max: 1, step: 0.001, default: 0 }}
                     value={sel.x || 0} onChange={(v) => updateShapeField(sel.uid, 'x', v)} />
                   <ParamControl param={{ key: 'y', label: 'offset y', type: 'range', min: -1, max: 1, step: 0.001, default: 0 }}
                     value={sel.y || 0} onChange={(v) => updateShapeField(sel.uid, 'y', v)} />
                   <ParamControl param={{ key: 'scale', label: 'scale', type: 'range', min: 0.1, max: 3, step: 0.001, default: 1 }}
                     value={sel.scale == null ? 1 : sel.scale} onChange={(v) => updateShapeField(sel.uid, 'scale', v)} />
-                  <ParamControl param={{ key: 'rotation', label: 'rotation', type: 'range', min: -Math.PI, max: Math.PI, step: 0.001, default: 0 }}
+                  <ParamControl param={{ key: 'rotation', label: 'rotation (z)', type: 'range', min: -Math.PI, max: Math.PI, step: 0.001, default: 0 }}
                     value={sel.rotation || 0} onChange={(v) => updateShapeField(sel.uid, 'rotation', v)} />
+                  <ParamControl param={{ key: 'rx', label: 'tilt x (rx)', type: 'range', min: -Math.PI, max: Math.PI, step: 0.001, default: 0 }}
+                    value={sel.rx || 0} onChange={(v) => updateShapeField(sel.uid, 'rx', v)} />
+                  <ParamControl param={{ key: 'ry', label: 'tilt y (ry)', type: 'range', min: -Math.PI, max: Math.PI, step: 0.001, default: 0 }}
+                    value={sel.ry || 0} onChange={(v) => updateShapeField(sel.uid, 'ry', v)} />
+                  <ParamControl param={{ key: 'perspective', label: 'perspective', type: 'range', min: 0, max: 3, step: 0.001, default: 1 }}
+                    value={sel.perspective != null ? sel.perspective : 1}
+                    onChange={(v) => updateShapeField(sel.uid, 'perspective', v)} />
                   <ParamControl param={{ key: 'cornerRadius', label: 'border radius', type: 'range', min: 0, max: 0.5, step: 0.001, default: 0 }}
                     value={sel.cornerRadius || 0} onChange={(v) => updateShapeField(sel.uid, 'cornerRadius', v)} />
                   <ParamControl param={{ key: 'opacity', label: 'opacity', type: 'range', min: 0, max: 1, step: 0.01, default: 1 }}

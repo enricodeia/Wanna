@@ -2250,6 +2250,155 @@ void main(){
   o = vec4(mix(col, res, u_mix), 1.0);
 }`
 
+// ============ TRACKING ============
+// BABY TRACK — analyzes per-cell luma variance ("saliency") and overlays a grid
+// of tracking boxes. Each active cell runs one of 8 selectable micro-effects
+// (invert / aberration / glitch / ascii / blur / pixelate / duotone / posterize),
+// rendered with a stroke and optional camera-AF corner brackets.
+const BABY_TRACK = `${HEADER}
+uniform float u_gridX, u_gridY;
+uniform float u_threshold;
+uniform float u_chaos;          // 0 = pure saliency, 1 = pure random
+uniform float u_shape;          // 0=rect 1=circle 2=diamond
+uniform float u_strokeW;        // stroke thickness in cell-fraction
+uniform float u_effectMix;
+uniform float u_showStroke;
+uniform float u_showCorners;
+uniform float u_mix;
+uniform vec3  u_strokeColor;
+// 8 effect-toggle slots — disabled cells just show the bracket
+uniform float u_fx0, u_fx1, u_fx2, u_fx3, u_fx4, u_fx5, u_fx6, u_fx7;
+uniform vec3  u_duoA, u_duoB;
+
+float btLuma(vec2 uv){ return luma(texture(u_tex, uv).rgb); }
+
+// 5-tap luma variance per cell — interesting (busy) cells light up
+float cellSaliency(vec2 cellId, vec2 cellSize){
+  vec2 c0 = (cellId + 0.5) * cellSize;
+  float l0 = btLuma(c0);
+  float l1 = btLuma(c0 + vec2(cellSize.x * 0.30, 0.0));
+  float l2 = btLuma(c0 - vec2(cellSize.x * 0.30, 0.0));
+  float l3 = btLuma(c0 + vec2(0.0, cellSize.y * 0.30));
+  float l4 = btLuma(c0 - vec2(0.0, cellSize.y * 0.30));
+  float m = (l0 + l1 + l2 + l3 + l4) * 0.2;
+  float v = ((l0-m)*(l0-m) + (l1-m)*(l1-m) + (l2-m)*(l2-m) + (l3-m)*(l3-m) + (l4-m)*(l4-m)) * 0.2;
+  return clamp(sqrt(v) * 4.0, 0.0, 1.0);
+}
+
+float fxEnabled(int idx){
+  if(idx == 0) return u_fx0;
+  if(idx == 1) return u_fx1;
+  if(idx == 2) return u_fx2;
+  if(idx == 3) return u_fx3;
+  if(idx == 4) return u_fx4;
+  if(idx == 5) return u_fx5;
+  if(idx == 6) return u_fx6;
+  return u_fx7;
+}
+
+vec3 microEffect(int idx, vec2 uv, vec2 cellId){
+  vec3 col = texture(u_tex, uv).rgb;
+  if(idx == 0){
+    return 1.0 - col;                                                       // invert
+  } else if(idx == 1){
+    float a = 0.006;
+    return vec3(texture(u_tex, uv + vec2(a, 0.0)).r, col.g,
+                texture(u_tex, uv - vec2(a, 0.0)).b);                       // aberration
+  } else if(idx == 2){
+    float h = hash(cellId + vec2(7.1, 13.7));
+    vec2 off = vec2((h - 0.5) * 0.06, 0.0);
+    return texture(u_tex, uv + off).rgb;                                    // glitch slice shift
+  } else if(idx == 3){
+    float l = luma(col);
+    return vec3(floor(l * 5.0) * 0.25);                                     // ascii-ish quantize
+  } else if(idx == 4){
+    vec2 px = 1.0 / u_res * 2.5;
+    vec3 s = vec3(0.0);
+    s += texture(u_tex, uv).rgb;
+    s += texture(u_tex, uv + vec2(px.x, 0.0)).rgb;
+    s += texture(u_tex, uv - vec2(px.x, 0.0)).rgb;
+    s += texture(u_tex, uv + vec2(0.0, px.y)).rgb;
+    s += texture(u_tex, uv - vec2(0.0, px.y)).rgb;
+    s += texture(u_tex, uv + vec2(px.x, px.y)).rgb;
+    s += texture(u_tex, uv - vec2(px.x, px.y)).rgb;
+    return s / 7.0;                                                         // blur
+  } else if(idx == 5){
+    vec2 cell = 1.0 / u_res * 10.0;
+    return texture(u_tex, (floor(uv / cell) + 0.5) * cell).rgb;             // pixelate
+  } else if(idx == 6){
+    return mix(u_duoA, u_duoB, luma(col));                                  // duotone
+  } else {
+    return floor(col * 4.0) / 3.0;                                          // posterize
+  }
+}
+
+float insideShapeMask(vec2 inCell){
+  vec2 d = inCell - 0.5;
+  if(u_shape > 1.5){
+    return step(abs(d.x) + abs(d.y), 0.5);                                  // diamond
+  } else if(u_shape > 0.5){
+    return step(length(d), 0.5);                                            // circle
+  }
+  return 1.0;                                                               // rect (fills cell)
+}
+
+float strokeMask(vec2 inCell, float w){
+  vec2 d = inCell - 0.5;
+  if(u_shape > 1.5){
+    float r = abs(d.x) + abs(d.y);
+    return smoothstep(0.5 - w, 0.5 - w*0.3, r) - smoothstep(0.5 - w*0.3, 0.5 + w*0.3, r);
+  } else if(u_shape > 0.5){
+    float r = length(d);
+    return smoothstep(0.5 - w, 0.5 - w*0.3, r) - smoothstep(0.5 - w*0.3, 0.5 + w*0.3, r);
+  }
+  // rect frame
+  vec2 e = abs(d) * 2.0;
+  float frame = max(e.x, e.y);
+  return smoothstep(1.0 - w*2.0, 1.0 - w, frame) * (1.0 - step(1.0, frame));
+}
+
+float cornerBrackets(vec2 inCell, float w){
+  vec2 d = abs(inCell - 0.5) * 2.0;
+  float legLen = 0.32;
+  bool inCorner = (d.x > 1.0 - legLen) && (d.y > 1.0 - legLen);
+  if(!inCorner) return 0.0;
+  float a = step(1.0 - w * 1.6, d.x);
+  float b = step(1.0 - w * 1.6, d.y);
+  return clamp(max(a, b), 0.0, 1.0) * (1.0 - step(1.0, max(d.x, d.y)));
+}
+
+void main(){
+  vec3 base = texture(u_tex, v_uv).rgb;
+  vec2 grid = vec2(max(u_gridX, 1.0), max(u_gridY, 1.0));
+  vec2 cellSize = 1.0 / grid;
+  vec2 cellId = floor(v_uv / cellSize);
+  vec2 inCell = fract(v_uv / cellSize);
+
+  float sal = cellSaliency(cellId, cellSize);
+  float h = hash(cellId * vec2(17.3, 91.7));
+  float activate = mix(sal, h, u_chaos);
+
+  if(activate < u_threshold){ o = vec4(base, 1.0); return; }
+
+  // Effect index per cell — deterministic
+  float effHash = hash(cellId * vec2(31.7, 53.1));
+  int idx = int(floor(effHash * 8.0));
+  float ena = fxEnabled(idx);
+
+  float inside = insideShapeMask(inCell);
+  vec3 fx = microEffect(idx, v_uv, cellId);
+  vec3 res = mix(base, fx, inside * u_effectMix * ena);
+
+  if(u_showStroke > 0.5){
+    res = mix(res, u_strokeColor, strokeMask(inCell, u_strokeW));
+  }
+  if(u_showCorners > 0.5 && u_shape < 0.5){
+    res = mix(res, u_strokeColor, cornerBrackets(inCell, u_strokeW));
+  }
+
+  o = vec4(mix(base, res, u_mix), 1.0);
+}`
+
 // ============ helpers ============
 const c = (r,g,b)=>[r,g,b]
 const BLACK = c(0,0,0), WHITE = c(1,1,1)
@@ -2295,6 +2444,35 @@ function deriveAsciiAtlas(values, engine){
 }
 
 export const EFFECTS = {
+  // TRACKING — image-saliency grid with per-cell micro-effects
+  babyTrack: {
+    id:'babyTrack', label:'BABY TRACK', group:'TRACKING', fs: BABY_TRACK,
+    params: [
+      { key:'u_gridX',       label:'cols',          type:'range',  min:2, max:40, step:1,    default:10 },
+      { key:'u_gridY',       label:'rows',          type:'range',  min:2, max:40, step:1,    default:10 },
+      { key:'u_threshold',   label:'threshold',     type:'range',  min:0, max:1, step:0.001, default:0.18 },
+      { key:'u_chaos',       label:'chaos',         type:'range',  min:0, max:1, step:0.01,  default:0.3 },
+      { key:'u_shape',       label:'box shape',     type:'select', options:[['rect',0],['circle',1],['diamond',2]], default:0 },
+      { key:'u_strokeW',     label:'stroke',        type:'range',  min:0, max:0.2, step:0.001, default:0.04 },
+      { key:'u_strokeColor', label:'stroke color',  type:'color',  default: c(0.05, 1, 0.6) },
+      { key:'u_effectMix',   label:'inside mix',    type:'range',  min:0, max:1, step:0.01, default:1 },
+      { key:'u_showStroke',  label:'show stroke',   type:'toggle', default:true },
+      { key:'u_showCorners', label:'corner AF',     type:'toggle', default:true },
+      // Pool of micro-effects — toggle which ones can appear in a tracked cell
+      { key:'u_fx0', label:'· invert',     type:'toggle', default:true },
+      { key:'u_fx1', label:'· aberration', type:'toggle', default:true },
+      { key:'u_fx2', label:'· glitch',     type:'toggle', default:true },
+      { key:'u_fx3', label:'· ascii',      type:'toggle', default:true },
+      { key:'u_fx4', label:'· blur',       type:'toggle', default:true },
+      { key:'u_fx5', label:'· pixelate',   type:'toggle', default:true },
+      { key:'u_fx6', label:'· duotone',    type:'toggle', default:true },
+      { key:'u_fx7', label:'· posterize',  type:'toggle', default:true },
+      { key:'u_duoA', label:'duotone A', type:'color', default: c(0.05, 0.10, 0.40) },
+      { key:'u_duoB', label:'duotone B', type:'color', default: c(1.0, 0.7, 0.2) },
+      { key:'u_mix', label:'mix', type:'range', min:0, max:1, step:0.01, default:1 }
+    ]
+  },
+
   // 3D MAPPING — own category, its own rules
   mapping3d: { id:'mapping3d', label:'3D MAPPING', group:'3D MAPPING', fs: MAPPING_3D, params: [
     { key:'u_view',           label:'view',           type:'select',
