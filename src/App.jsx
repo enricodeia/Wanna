@@ -29,7 +29,7 @@ const SAMPLES = [
 ]
 
 const REC_OPTIONS = [5, 10, 15, 30]
-const DEFAULT_TRANSFORM = { x: 0.5, y: 0.5, scale: 1, rotation: 0, rx: 0, ry: 0, perspective: 1, opacity: 1 }
+const DEFAULT_TRANSFORM = { x: 0.5, y: 0.5, z: 0, scale: 1, rotation: 0, rx: 0, ry: 0, perspective: 1, opacity: 1 }
 // Curated Google Fonts. User can also paste custom names; we inject the <link>.
 const GOOGLE_FONTS = [
   'Inter', 'Space Grotesk', 'JetBrains Mono', 'Playfair Display', 'Bebas Neue',
@@ -124,6 +124,79 @@ function generatePrimitive(kind, cx = 0.5, cy = 0.5, size = 0.18){
     }
   }
   return pts
+}
+
+// ---- 3D-MAPPING CPU previews (small thumbnails of normal / depth / roughness) ----
+// We only need a small (96px) approximation: real-time sobel on the source's luma.
+const buildMapPreviews = (img, size = 96, normalAmt = 1, depthAmt = 1, roughAmt = 1) => {
+  if(!img) return null
+  const c = document.createElement('canvas')
+  c.width = size; c.height = size
+  const ctx = c.getContext('2d')
+  // Cover-fit the source into a square thumb
+  const w = img.naturalWidth || img.width || img.videoWidth
+  const h = img.naturalHeight || img.height || img.videoHeight
+  if(!w || !h) return null
+  const ar = w / h
+  let sw = size, sh = size, ox = 0, oy = 0
+  if(ar > 1){ sw = size * ar; ox = -(sw - size) / 2 } else { sh = size / ar; oy = -(sh - size) / 2 }
+  try { ctx.drawImage(img, ox, oy, sw, sh) } catch(_){ return null }
+  const src = ctx.getImageData(0, 0, size, size).data
+  const lum = new Float32Array(size * size)
+  for(let i = 0, j = 0; i < src.length; i += 4, j++){
+    lum[j] = (0.2126 * src[i] + 0.7152 * src[i+1] + 0.0722 * src[i+2]) / 255
+  }
+  const make = (fill) => {
+    const cc = document.createElement('canvas')
+    cc.width = size; cc.height = size
+    const cctx = cc.getContext('2d')
+    const out = cctx.createImageData(size, size)
+    for(let y = 0; y < size; y++){
+      for(let x = 0; x < size; x++){
+        const idx = y * size + x
+        const o4 = idx * 4
+        const [r, g, b] = fill(x, y, idx)
+        out.data[o4]   = r
+        out.data[o4+1] = g
+        out.data[o4+2] = b
+        out.data[o4+3] = 255
+      }
+    }
+    cctx.putImageData(out, 0, 0)
+    return cc.toDataURL('image/png')
+  }
+  const sample = (x, y) => lum[Math.min(size-1, Math.max(0, y)) * size + Math.min(size-1, Math.max(0, x))]
+  const depth = make((x, y, idx) => {
+    const v = Math.min(255, Math.max(0, lum[idx] * depthAmt * 255))
+    return [v, v, v]
+  })
+  const normal = make((x, y) => {
+    const l = sample(x-1, y) * depthAmt
+    const r = sample(x+1, y) * depthAmt
+    const u = sample(x, y-1) * depthAmt
+    const d = sample(x, y+1) * depthAmt
+    const strength = Math.max(normalAmt * 8, 0.0001)
+    let nx = (l - r) * strength
+    let ny = (u - d) * strength
+    let nz = 1
+    const ln = Math.sqrt(nx*nx + ny*ny + nz*nz) || 1
+    nx /= ln; ny /= ln; nz /= ln
+    return [Math.round((nx*0.5+0.5)*255), Math.round((ny*0.5+0.5)*255), Math.round((nz*0.5+0.5)*255)]
+  })
+  const roughness = make((x, y, idx) => {
+    const c0 = lum[idx]
+    let v = 0
+    for(let dx = -1; dx <= 1; dx++){
+      for(let dy = -1; dy <= 1; dy++){
+        if(dx === 0 && dy === 0) continue
+        const dl = sample(x+dx, y+dy) - c0
+        v += dl * dl
+      }
+    }
+    const r = Math.min(1, Math.sqrt(v / 8) * roughAmt * 6) * 255
+    return [r, r, r]
+  })
+  return { depth, normal, roughness }
 }
 
 const generateImageThumb = (img, size = 46) => {
@@ -240,6 +313,67 @@ function TextDraftInput({ draft, wrapW, wrapH, onChange, onCommit, onCancel }){
   )
 }
 
+// 3D MAPPING param panel — shows generated normal / depth / roughness as
+// thumbnails, lets the user pick a channel to inspect (drives u_view) and
+// tunes only that channel's params; lighting & composite stay always visible.
+function Mapping3DPanel({ sel, sourceMedia, onChange, params }){
+  const [previews, setPreviews] = useState(null)
+  const v = sel.values
+  // Re-build previews whenever the source or the per-channel intensities change.
+  useEffect(() => {
+    if(!sourceMedia){ setPreviews(null); return }
+    const out = buildMapPreviews(sourceMedia, 96, v.u_normalAmt || 1, v.u_depthAmt || 1, v.u_roughAmt || 1)
+    setPreviews(out)
+  }, [sourceMedia, v.u_normalAmt, v.u_depthAmt, v.u_roughAmt])
+
+  const view = Math.round(v.u_view || 0)
+  const setView = (n) => onChange('u_view', n)
+  const channelDef = [
+    { id: 0, label: 'composite', thumb: null,            keys: ['u_invert', 'u_mix'] },
+    { id: 1, label: 'normal',    thumb: previews?.normal,    keys: ['u_normalAmt'] },
+    { id: 2, label: 'depth',     thumb: previews?.depth,     keys: ['u_depthAmt', 'u_parallax'] },
+    { id: 3, label: 'roughness', thumb: previews?.roughness, keys: ['u_roughAmt'] }
+  ]
+  const lightingKeys = ['u_lightAngle', 'u_lightHeight', 'u_lightIntensity', 'u_ambient', 'u_specular', 'u_lightColor', 'u_shadowColor']
+  const findParam = (key) => params.find(p => p.key === key)
+  const renderParams = (keys) => keys.map(k => {
+    const p = findParam(k)
+    if(!p) return null
+    return (
+      <ParamControl key={p.key} param={p}
+        value={sel.values[p.key]}
+        onChange={(val) => onChange(p.key, val)} />
+    )
+  })
+
+  return (
+    <div className="mapping3d-panel">
+      <div className="m3d-thumbs">
+        {channelDef.map(ch => (
+          <button key={ch.id}
+            className={'m3d-thumb-btn ' + (view === ch.id ? 'on' : '')}
+            onClick={() => setView(ch.id)}
+            title={`view ${ch.label}`}>
+            <div className="m3d-thumb-frame">
+              {ch.thumb
+                ? <img src={ch.thumb} alt={ch.label} />
+                : <span className="m3d-thumb-empty">{ch.id === 0 ? 'COMP' : '—'}</span>}
+            </div>
+            <span className="m3d-thumb-label">{ch.label}</span>
+          </button>
+        ))}
+      </div>
+      {!sourceMedia && <div className="param-hint" style={{ padding: '0 0 8px' }}>add an image or video to preview the maps</div>}
+      <div className="m3d-section-h">{channelDef[view].label.toUpperCase()} PARAMS</div>
+      {renderParams(channelDef[view].keys)}
+      <div className="m3d-section-h">LIGHTING</div>
+      {renderParams(lightingKeys)}
+      <div className="m3d-section-h">COMPOSITE</div>
+      {renderParams(['u_invert', 'u_mix'])}
+    </div>
+  )
+}
+
 function ShapeThumb({ shape }){
   const points = shape.points
   if(!points || points.length < 6) return <span className="thumb empty"/>
@@ -307,6 +441,11 @@ export default function App(){
 
   const [aspect, setAspect] = useState('1:1')
   const [bg, setBg] = useState({ ...DEFAULT_BG })
+  // 3D scene mode — orbit the canvas like a true 3D scene. yaw / pitch in radians.
+  const [cameraMode, setCameraMode] = useState('2d')
+  const [camera, setCamera] = useState({ yaw: 0, pitch: 0, zoom: 1 })
+  const cameraRef = useRef(camera); cameraRef.current = camera
+  const cameraModeRef = useRef(cameraMode); cameraModeRef.current = cameraMode
   const [search, setSearch] = useState('')
   const [tool, setTool] = useState('select')
   const [penColor, setPenColor] = useState([0.05, 0.05, 0.05])
@@ -446,7 +585,8 @@ export default function App(){
         layers: layersForRender,
         time,
         bg: bgRef.current,
-        mouse: gs
+        mouse: gs,
+        cam: { mode: cameraModeRef.current, ...cameraRef.current }
       })
       raf = requestAnimationFrame(tick)
     }
@@ -484,7 +624,8 @@ export default function App(){
           uid: crypto.randomUUID(), type: 'image',
           name: name || ('image-' + (idx + 1)),
           tex, imgW: img.naturalWidth, imgH: img.naturalHeight,
-          thumbnail, visible: true, _follow: false, transform: t
+          thumbnail, _srcMedia: img,
+          visible: true, _follow: false, transform: t
         }
         setSelectedUid(layer.uid)
         return [...s, layer]
@@ -508,7 +649,8 @@ export default function App(){
         uid: crypto.randomUUID(), type: 'image',
         name: name || ('image-' + (idx + 1)),
         tex, imgW: bitmap.width, imgH: bitmap.height,
-        thumbnail, visible: true, _follow: false, transform: t
+        thumbnail, _srcMedia: bitmap,
+        visible: true, _follow: false, transform: t
       }
       setSelectedUid(layer.uid)
       return [...s, layer]
@@ -1197,7 +1339,19 @@ export default function App(){
       return
     }
     const hit = hitTest(px, py, rect.width, rect.height)
-    if(!hit){ setSelectedUid(null); return }
+    if(!hit){
+      // In 3D mode, clicking an empty area starts a camera orbit drag (Blender-style).
+      if(cameraMode === '3d'){
+        dragRef.current = {
+          kind: 'orbit',
+          startX: e.clientX, startY: e.clientY,
+          startYaw: cameraRef.current.yaw, startPitch: cameraRef.current.pitch
+        }
+        e.currentTarget.setPointerCapture?.(e.pointerId)
+        return
+      }
+      setSelectedUid(null); return
+    }
     if(hit.type === 'vertex'){
       dragRef.current = { kind: 'vertex', uid: hit.shape.uid, vertexIdx: hit.vertexIdx }
       e.currentTarget.setPointerCapture?.(e.pointerId)
@@ -1216,6 +1370,15 @@ export default function App(){
     const { px, py } = updateMouse(e)
     const d = dragRef.current
     if(!d) return
+    if(d.kind === 'orbit'){
+      const dx = e.clientX - d.startX
+      const dy = e.clientY - d.startY
+      const sens = 0.005
+      const newYaw = d.startYaw + dx * sens
+      const newPitch = Math.max(-1.4, Math.min(1.4, d.startPitch + dy * sens))
+      setCamera((c) => ({ ...c, yaw: newYaw, pitch: newPitch }))
+      return
+    }
     if(d.kind === 'vertex'){
       const sh = layers.find(x => x.uid === d.uid)
       if(!sh) return
@@ -1397,14 +1560,25 @@ export default function App(){
         <div className="brand">
           <span className="logo">Bianca Tool</span>
         </div>
-        <div className="tools">
-          <button className={'tool-btn ' + (tool === 'select' ? 'on' : '')} onClick={() => { setTool('select'); cancelDrawing() }} title="Select (V)">SELECT</button>
-          <button className={'tool-btn ' + (tool === 'pen' ? 'on' : '')} onClick={() => setTool('pen')} title="Pen (P)">PEN</button>
-          <button className={'tool-btn ' + (tool === 'text' ? 'on' : '')} onClick={() => setTool('text')} title="Text (T)">TEXT</button>
-          {tool === 'pen' && (
-            <input type="color" className="fill-swatch" value={rgb2hex(penColor)}
-              onChange={(e) => setPenColor(hex2rgb(e.target.value))} title="Shape fill" />
-          )}
+        <div className="center-toolbar">
+          <div className="tools">
+            <button className={'tool-btn ' + (tool === 'select' ? 'on' : '')} onClick={() => { setTool('select'); cancelDrawing() }} title="Select (V)">SELECT</button>
+            <button className={'tool-btn ' + (tool === 'pen' ? 'on' : '')} onClick={() => setTool('pen')} title="Pen (P)">PEN</button>
+            <button className={'tool-btn ' + (tool === 'text' ? 'on' : '')} onClick={() => setTool('text')} title="Text (T)">TEXT</button>
+            {tool === 'pen' && (
+              <input type="color" className="fill-swatch" value={rgb2hex(penColor)}
+                onChange={(e) => setPenColor(hex2rgb(e.target.value))} title="Shape fill" />
+            )}
+          </div>
+          <div className="tools cam-toggle">
+            <button className={'tool-btn ' + (cameraMode === '2d' ? 'on' : '')} onClick={() => setCameraMode('2d')} title="2D canvas">2D</button>
+            <button className={'tool-btn ' + (cameraMode === '3d' ? 'on' : '')} onClick={() => setCameraMode('3d')} title="3D scene · drag empty canvas to orbit">3D</button>
+          </div>
+          <div className="tools aspect-toggle">
+            {ASPECTS.map((x) => (
+              <button key={x.id} className={'tool-btn ' + (x.id === aspect ? 'on' : '')} onClick={() => setAspect(x.id)}>{x.id}</button>
+            ))}
+          </div>
         </div>
         <div className="actions">
           <button className="btn" disabled={!canUndo} onClick={undo} title="Undo (⌘Z)">⌘Z</button>
@@ -1497,6 +1671,28 @@ export default function App(){
             )}
           </div>
         ))}
+
+        {/* === CAMERA (3D scene) === */}
+        {cameraMode === '3d' && (
+          <>
+            <div className="section-bar bg-bar">
+              <span className="section-letter">C</span>
+              <span className="section-label">CAMERA · 3D</span>
+              <span className="section-count">drag canvas to orbit</span>
+            </div>
+            <div className="bg-panel">
+              <ParamControl param={{ key:'yaw', label:'yaw', type:'range', min:-Math.PI*2, max:Math.PI*2, step:0.001, default:0 }}
+                value={camera.yaw} onChange={(v) => setCamera(c => ({ ...c, yaw: v }))} />
+              <ParamControl param={{ key:'pitch', label:'pitch', type:'range', min:-1.4, max:1.4, step:0.001, default:0 }}
+                value={camera.pitch} onChange={(v) => setCamera(c => ({ ...c, pitch: v }))} />
+              <ParamControl param={{ key:'zoom', label:'zoom', type:'range', min:0.2, max:3, step:0.001, default:1 }}
+                value={camera.zoom} onChange={(v) => setCamera(c => ({ ...c, zoom: v }))} />
+              <div className="row-btns">
+                <button className="mini-btn" onClick={() => setCamera({ yaw: 0, pitch: 0, zoom: 1 })}>reset camera</button>
+              </div>
+            </div>
+          </>
+        )}
 
         {/* === BACKGROUND === */}
         <div className="section-bar bg-bar">
@@ -1601,12 +1797,6 @@ export default function App(){
             />
           )}
 
-          <div className="canvas-coords">{aspect}</div>
-          <div className="canvas-aspect">
-            {ASPECTS.map((x) => (
-              <button key={x.id} className={x.id === aspect ? 'on' : ''} onClick={() => setAspect(x.id)}>{x.id}</button>
-            ))}
-          </div>
           {tool === 'pen' && (
             <div className="canvas-hint">
               {drawing.active ? `${drawing.points.length / 2} pt · ↵ close · esc cancel` : 'click to start drawing'}
@@ -1776,11 +1966,18 @@ export default function App(){
                     </div>
                   )}
                   {sel._follow && <FollowControls uid={sel.uid} cfg={sel._followCfg} />}
-                  {selEffect.params.map((p) => (
-                    <ParamControl key={p.key} param={p}
-                      value={sel.values[p.key]}
-                      onChange={(v) => updateEffectValue(sel.uid, p.key, v)} />
-                  ))}
+                  {sel.effectId === 'mapping3d' ? (
+                    <Mapping3DPanel sel={sel}
+                      sourceMedia={layers.find(l => (l.type === 'image' || l.type === 'video') && l._srcMedia)?._srcMedia}
+                      onChange={(k, v) => updateEffectValue(sel.uid, k, v)}
+                      params={selEffect.params} />
+                  ) : (
+                    selEffect.params.map((p) => (
+                      <ParamControl key={p.key} param={p}
+                        value={sel.values[p.key]}
+                        onChange={(v) => updateEffectValue(sel.uid, p.key, v)} />
+                    ))
+                  )}
                   <div className="row-btns">
                     <button className="mini-btn" onClick={() => resetEffect(sel.uid)}>reset values</button>
                   </div>
@@ -1808,6 +2005,8 @@ export default function App(){
                     value={sel.transform.rx || 0} onChange={(v) => updateImageTransform(sel.uid, 'rx', v)} />
                   <ParamControl param={{ key: 'ry', label: 'tilt y (ry)', type: 'range', min: -Math.PI, max: Math.PI, step: 0.001, default: 0 }}
                     value={sel.transform.ry || 0} onChange={(v) => updateImageTransform(sel.uid, 'ry', v)} />
+                  <ParamControl param={{ key: 'z', label: 'z (depth)', type: 'range', min: -1.5, max: 1.5, step: 0.001, default: 0 }}
+                    value={sel.transform.z || 0} onChange={(v) => updateImageTransform(sel.uid, 'z', v)} />
                   <ParamControl param={{ key: 'perspective', label: 'perspective', type: 'range', min: 0, max: 3, step: 0.001, default: 1 }}
                     value={sel.transform.perspective != null ? sel.transform.perspective : 1}
                     onChange={(v) => updateImageTransform(sel.uid, 'perspective', v)} />
@@ -1893,6 +2092,8 @@ export default function App(){
                     value={sel.rx || 0} onChange={(v) => updateShapeField(sel.uid, 'rx', v)} />
                   <ParamControl param={{ key: 'ry', label: 'tilt y (ry)', type: 'range', min: -Math.PI, max: Math.PI, step: 0.001, default: 0 }}
                     value={sel.ry || 0} onChange={(v) => updateShapeField(sel.uid, 'ry', v)} />
+                  <ParamControl param={{ key: 'z', label: 'z (depth)', type: 'range', min: -1.5, max: 1.5, step: 0.001, default: 0 }}
+                    value={sel.z || 0} onChange={(v) => updateShapeField(sel.uid, 'z', v)} />
                   <ParamControl param={{ key: 'perspective', label: 'perspective', type: 'range', min: 0, max: 3, step: 0.001, default: 1 }}
                     value={sel.perspective != null ? sel.perspective : 1}
                     onChange={(v) => updateShapeField(sel.uid, 'perspective', v)} />

@@ -60,6 +60,12 @@ button{ background: none; border: 0; cursor: pointer; padding: 0; color: inherit
 }
 .brand-svg{ display: block; }
 
+.center-toolbar{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .tools{
   display: flex;
   gap: 0;
@@ -67,6 +73,8 @@ button{ background: none; border: 0; cursor: pointer; padding: 0; color: inherit
   border-radius: 4px;
   overflow: hidden;
 }
+.cam-toggle .tool-btn{ min-width: 38px; }
+.aspect-toggle .tool-btn{ font-size: 10px; padding: 8px 9px; }
 .tool-btn{
   font-size: 11px;
   font-weight: 600;
@@ -1151,6 +1159,53 @@ button{ background: none; border: 0; cursor: pointer; padding: 0; color: inherit
 }
 .bg-type-btn:hover{ background: var(--hover); }
 .bg-type-btn.on{ background: var(--ink); color: var(--paper); border-color: var(--ink); }
+/* ============ 3D MAPPING panel ============ */
+.mapping3d-panel{ display: flex; flex-direction: column; }
+.m3d-thumbs{
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.m3d-thumb-btn{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1.5px solid var(--line-strong);
+  background: var(--paper);
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: var(--mono);
+}
+.m3d-thumb-btn.on{ border-color: var(--ink); background: var(--paper-2); }
+.m3d-thumb-btn:hover{ border-color: var(--ink); }
+.m3d-thumb-frame{
+  width: 100%;
+  aspect-ratio: 1;
+  background: repeating-linear-gradient(45deg, #f0f0f0, #f0f0f0 4px, #fafafa 4px, #fafafa 8px);
+  border-radius: 3px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.m3d-thumb-frame img{ width: 100%; height: 100%; object-fit: cover; display: block; }
+.m3d-thumb-empty{ font-size: 9px; color: var(--mute); font-weight: 700; letter-spacing: 0.06em; }
+.m3d-thumb-label{ font-size: 8px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; opacity: 0.85; }
+.m3d-thumb-btn.on .m3d-thumb-label{ opacity: 1; }
+.m3d-section-h{
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink);
+  padding: 8px 0 4px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 6px;
+}
+
 .bg-transparent-note{
   font-size: 10px;
   letter-spacing: 0.02em;

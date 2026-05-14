@@ -24,33 +24,51 @@ uniform float u_rotation;
 uniform float u_rx;
 uniform float u_ry;
 uniform float u_perspective;
+uniform float u_layerZ;       // depth offset in scene
+uniform float u_camMode;       // 0 = 2D, 1 = 3D
+uniform float u_camYaw;
+uniform float u_camPitch;
+uniform float u_camZoom;
 out vec2 v_uv;
 void main(){
   vec3 p = vec3(a_pos * u_size, 0.0);
 
-  // Z rotation (in-plane)
+  // Local rotations around sprite origin.
   float cz = cos(u_rotation), sz = sin(u_rotation);
   p = mat3(cz, -sz, 0.0,  sz, cz, 0.0,  0.0, 0.0, 1.0) * p;
-
-  // X rotation (tilt forward / back)
   float cx = cos(u_rx), sx = sin(u_rx);
   p = mat3(1.0, 0.0, 0.0,  0.0, cx, -sx,  0.0, sx, cx) * p;
-
-  // Y rotation (tilt left / right)
   float cy = cos(u_ry), sy = sin(u_ry);
   p = mat3(cy, 0.0, sy,  0.0, 1.0, 0.0,  -sy, 0.0, cy) * p;
 
-  // One-point perspective using a focal-length formula. Bounded denominator
-  // so even hard tilts (rx/ry near +- pi/2) stay on screen instead of
-  // collapsing through the camera plane.
+  // Place sprite in world: 2D center + scene depth.
+  p.xy += u_center;
+  p.z  += u_layerZ;
+
+  vec2 cc = u_canvasSize * 0.5;
+
+  if(u_camMode > 0.5){
+    // 3D scene mode — orbit the camera around the canvas center.
+    p.xy -= cc;
+    float cyw = cos(u_camYaw), syw = sin(u_camYaw);
+    p = mat3(cyw, 0.0, syw,  0.0, 1.0, 0.0,  -syw, 0.0, cyw) * p;
+    float cpt = cos(u_camPitch), spt = sin(u_camPitch);
+    p = mat3(1.0, 0.0, 0.0,  0.0, cpt, -spt,  0.0, spt, cpt) * p;
+    p.xy *= u_camZoom;
+    p.xy += cc;
+  }
+
+  // Perspective: in 2D mode it pivots around the sprite center (so local
+  // rx/ry tilts read as a card flipping). In 3D mode it pivots around the
+  // canvas center so the whole scene shares one camera.
   float strength = max(u_perspective, 0.001);
   float focal = 1400.0 / strength;
   float denom = max(focal - p.z, 80.0);
   float persp = focal / denom;
-  p.xy *= persp;
+  vec2 pivot = (u_camMode > 0.5) ? cc : u_center;
+  p.xy = (p.xy - pivot) * persp + pivot;
 
-  vec2 wp = p.xy + u_center;
-  vec2 ndc = (wp / u_canvasSize) * 2.0 - 1.0;
+  vec2 ndc = (p.xy / u_canvasSize) * 2.0 - 1.0;
   gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
   v_uv = a_uv;
 }`
@@ -366,44 +384,71 @@ export function transformShapePoints(points, { x = 0, y = 0, scale = 1, rotation
 }
 
 // 3D version with rx/ry tilt + one-point perspective. Used for rendering when
-// the shape carries non-zero rx/ry; otherwise the 2D function is used.
+// the shape carries non-zero rx/ry; otherwise the 2D function is used. Now also
+// applies a scene camera (yaw / pitch / zoom) when cam.mode === '3d'.
 export function transformShapePoints3D(points, opts = {}){
-  const { x = 0, y = 0, scale = 1, rotation = 0, cornerRadius = 0,
-          rx = 0, ry = 0, perspective = 1 } = opts
-  if(!rx && !ry) return transformShapePoints(points, opts)
+  const { x = 0, y = 0, z = 0, scale = 1, rotation = 0, cornerRadius = 0,
+          rx = 0, ry = 0, perspective = 1, cam = null } = opts
+  const usingCam = cam && cam.mode === '3d'
+  if(!rx && !ry && !z && !usingCam) return transformShapePoints(points, opts)
   const rounded = cornerRadius > 0 ? roundPolygon(points, cornerRadius) : points.slice()
   const [cx, cy] = shapeCentroid(rounded)
   const cz = Math.cos(rotation), sz = Math.sin(rotation)
   const cxR = Math.cos(rx), sxR = Math.sin(rx)
   const cyR = Math.cos(ry), syR = Math.sin(ry)
-  // Bounded one-point perspective. Shapes live in 0..1 space, so a focal length
-  // of ~2.0 / strength reads naturally; denom is clamped so hard tilts can't
-  // flip the polygon through the camera plane.
+  const camYaw = usingCam ? (cam.yaw || 0) : 0
+  const camPitch = usingCam ? (cam.pitch || 0) : 0
+  const camZoom = usingCam ? (cam.zoom != null ? cam.zoom : 1) : 1
+  const cyC = Math.cos(camYaw), syC = Math.sin(camYaw)
+  const cpC = Math.cos(camPitch), spC = Math.sin(camPitch)
   const strength = Math.max(perspective, 0.001)
   const focal = 2.0 / strength
   const out = new Float32Array(rounded.length)
   for(let i = 0; i < rounded.length; i += 2){
+    // Local-space rotation around shape origin
     let px = (rounded[i] - cx) * scale
     let py = (rounded[i + 1] - cy) * scale
     let pz = 0
-    // Z rotation
     const x1 = px * cz - py * sz
     const y1 = px * sz + py * cz
     px = x1; py = y1
-    // X rotation
     const y2 = py * cxR - pz * sxR
     const z2 = py * sxR + pz * cxR
     py = y2; pz = z2
-    // Y rotation
     const x3 = px * cyR + pz * syR
     const z3 = -px * syR + pz * cyR
     px = x3; pz = z3
-    // Bounded perspective
+    // Place into scene (canvas-normalized 0..1) and add layer depth
+    px += cx + x
+    py += cy + y
+    pz += z
+
+    if(usingCam){
+      // Orbit around canvas center (0.5, 0.5)
+      let wx = px - 0.5, wy = py - 0.5, wz = pz
+      const yx = wx * cyC + wz * syC
+      const yz = -wx * syC + wz * cyC
+      wx = yx; wz = yz
+      const py2 = wy * cpC - wz * spC
+      const pz2 = wy * spC + wz * cpC
+      wy = py2; wz = pz2
+      wx *= camZoom; wy *= camZoom
+      px = wx + 0.5; py = wy + 0.5; pz = wz
+    }
+
+    // Bounded perspective around canvas center (3D) or anchor (2D)
     const denom = Math.max(focal - pz, 0.05)
     const k = focal / denom
-    px *= k; py *= k
-    out[i]     = px + cx + x
-    out[i + 1] = py + cy + y
+    if(usingCam){
+      px = (px - 0.5) * k + 0.5
+      py = (py - 0.5) * k + 0.5
+    } else {
+      // 2D: pivot around shape anchor — keeps the existing card-flip feel
+      px = (px - (cx + x)) * k + (cx + x)
+      py = (py - (cy + y)) * k + (cy + y)
+    }
+    out[i]     = px
+    out[i + 1] = py
   }
   return out
 }
@@ -507,6 +552,14 @@ export function createEngine(canvas){
     gl.drawArrays(gl.TRIANGLES, 0, 3)
   }
 
+  let currentCam = null
+  function setCameraUniforms(){
+    const cam = currentCam || { mode: '2d', yaw: 0, pitch: 0, zoom: 1 }
+    if(spriteU.u_camMode)  gl.uniform1f(spriteU.u_camMode,  cam.mode === '3d' ? 1 : 0)
+    if(spriteU.u_camYaw)   gl.uniform1f(spriteU.u_camYaw,   cam.yaw || 0)
+    if(spriteU.u_camPitch) gl.uniform1f(spriteU.u_camPitch, cam.pitch || 0)
+    if(spriteU.u_camZoom)  gl.uniform1f(spriteU.u_camZoom,  cam.zoom != null ? cam.zoom : 1)
+  }
   function drawSprite(s){
     const t = s.transform || s
     const canvasMin = Math.min(W, H)
@@ -522,6 +575,10 @@ export function createEngine(canvas){
     if(spriteU.u_rx) gl.uniform1f(spriteU.u_rx, t.rx || 0)
     if(spriteU.u_ry) gl.uniform1f(spriteU.u_ry, t.ry || 0)
     if(spriteU.u_perspective) gl.uniform1f(spriteU.u_perspective, t.perspective != null ? t.perspective : 1)
+    // Layer z is in scene units; multiply by canvasMin so the slider's 0..1 range
+    // pushes the sprite a meaningful distance forward / back.
+    if(spriteU.u_layerZ) gl.uniform1f(spriteU.u_layerZ, (t.z || 0) * canvasMin)
+    setCameraUniforms()
     gl.uniform1f(spriteU.u_opacity, t.opacity == null ? 1 : t.opacity)
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
   }
@@ -529,12 +586,13 @@ export function createEngine(canvas){
   function drawShape(s){
     if(!s.points || s.points.length < 6) return
     const tp = transformShapePoints3D(s.points, {
-      x: s.x || 0, y: s.y || 0,
+      x: s.x || 0, y: s.y || 0, z: s.z || 0,
       scale: s.scale == null ? 1 : s.scale,
       rotation: s.rotation || 0,
       cornerRadius: s.cornerRadius || 0,
       rx: s.rx || 0, ry: s.ry || 0,
-      perspective: s.perspective != null ? s.perspective : 1
+      perspective: s.perspective != null ? s.perspective : 1,
+      cam: currentCam
     })
     const n = tp.length / 2
     if(n < 3) return
@@ -683,8 +741,9 @@ export function createEngine(canvas){
   // layers: bottom-to-top. Each layer is either a sprite (image/text/shape)
   // OR an effect. Global effects (no scopedTo) affect the current accumulated framebuffer.
   // Scoped effects (effect.scopedTo === sprite.uid) apply ONLY to that sprite.
-  function render({ layers, time, bg, mouse }){
+  function render({ layers, time, bg, mouse, cam }){
     if(!fboA) return
+    currentCam = cam || null
 
     // Group scoped effects by their target uid; skip them in the global pass.
     const scopedByUid = new Map()
