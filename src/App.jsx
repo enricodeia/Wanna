@@ -179,34 +179,38 @@ function projectLayerPoint(local, layer, cam, cameraMode, W, H, includeLocalTilt
   return [x, y]
 }
 
-// ---- 3D-MAPPING CPU previews (small thumbnails of normal / depth / roughness) ----
-// We only need a small (96px) approximation: real-time sobel on the source's luma.
-const buildMapPreviews = (img, size = 96, normalAmt = 1, depthAmt = 1, roughAmt = 1) => {
+// ---- 3D-MAPPING CPU previews ----
+// Match the shader's math exactly so the preview thumbnails line up perfectly
+// with what gets rendered on the canvas. We render at the source's actual
+// aspect (no square crop), use the same Sobel-on-luma normal formula, and
+// the same per-pixel variance roughness as the shader.
+const buildMapPreviews = (img, maxSize = 128, normalAmt = 1, depthAmt = 1, roughAmt = 1) => {
   if(!img) return null
-  const c = document.createElement('canvas')
-  c.width = size; c.height = size
-  const ctx = c.getContext('2d')
-  // Cover-fit the source into a square thumb
   const w = img.naturalWidth || img.width || img.videoWidth
   const h = img.naturalHeight || img.height || img.videoHeight
   if(!w || !h) return null
+  // Aspect-preserving downscale so a wide source stays wide in the thumbnail.
   const ar = w / h
-  let sw = size, sh = size, ox = 0, oy = 0
-  if(ar > 1){ sw = size * ar; ox = -(sw - size) / 2 } else { sh = size / ar; oy = -(sh - size) / 2 }
-  try { ctx.drawImage(img, ox, oy, sw, sh) } catch(_){ return null }
-  const src = ctx.getImageData(0, 0, size, size).data
-  const lum = new Float32Array(size * size)
+  const W = ar >= 1 ? maxSize : Math.max(8, Math.round(maxSize * ar))
+  const H = ar >= 1 ? Math.max(8, Math.round(maxSize / ar)) : maxSize
+  const c = document.createElement('canvas')
+  c.width = W; c.height = H
+  const ctx = c.getContext('2d')
+  if('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high'
+  try { ctx.drawImage(img, 0, 0, W, H) } catch(_){ return null }
+  const src = ctx.getImageData(0, 0, W, H).data
+  const lum = new Float32Array(W * H)
   for(let i = 0, j = 0; i < src.length; i += 4, j++){
     lum[j] = (0.2126 * src[i] + 0.7152 * src[i+1] + 0.0722 * src[i+2]) / 255
   }
   const make = (fill) => {
     const cc = document.createElement('canvas')
-    cc.width = size; cc.height = size
+    cc.width = W; cc.height = H
     const cctx = cc.getContext('2d')
-    const out = cctx.createImageData(size, size)
-    for(let y = 0; y < size; y++){
-      for(let x = 0; x < size; x++){
-        const idx = y * size + x
+    const out = cctx.createImageData(W, H)
+    for(let y = 0; y < H; y++){
+      for(let x = 0; x < W; x++){
+        const idx = y * W + x
         const o4 = idx * 4
         const [r, g, b] = fill(x, y, idx)
         out.data[o4]   = r
@@ -218,11 +222,13 @@ const buildMapPreviews = (img, size = 96, normalAmt = 1, depthAmt = 1, roughAmt 
     cctx.putImageData(out, 0, 0)
     return cc.toDataURL('image/png')
   }
-  const sample = (x, y) => lum[Math.min(size-1, Math.max(0, y)) * size + Math.min(size-1, Math.max(0, x))]
+  const sample = (x, y) => lum[Math.min(H-1, Math.max(0, y)) * W + Math.min(W-1, Math.max(0, x))]
+  // Depth: luma scaled by depthAmt (matches the shader's computeDepth).
   const depth = make((x, y, idx) => {
     const v = Math.min(255, Math.max(0, lum[idx] * depthAmt * 255))
     return [v, v, v]
   })
+  // Normal: same sobel-on-(luma*depthAmt) the shader uses, with strength = normalAmt*8.
   const normal = make((x, y) => {
     const l = sample(x-1, y) * depthAmt
     const r = sample(x+1, y) * depthAmt
@@ -236,6 +242,7 @@ const buildMapPreviews = (img, size = 96, normalAmt = 1, depthAmt = 1, roughAmt 
     nx /= ln; ny /= ln; nz /= ln
     return [Math.round((nx*0.5+0.5)*255), Math.round((ny*0.5+0.5)*255), Math.round((nz*0.5+0.5)*255)]
   })
+  // Roughness: per-pixel local variance of luma scaled by roughAmt*6 (matches shader).
   const roughness = make((x, y, idx) => {
     const c0 = lum[idx]
     let v = 0
@@ -339,6 +346,24 @@ const renderTextToCanvas = (text, opts = {}) => {
   ctx.lineWidth = Math.max(0, strokePx)
   ctx.lineJoin = 'round'
   ctx.lineCap = 'round'
+  // Pass 1 — "halo dilation". Draw the text once with a tiny same-color shadow.
+  // This bleeds the fill RGB into the surrounding transparent pixels so when
+  // the GL mipmap later downsamples a glyph next to RGB(0,0,0) transparency it
+  // doesn't introduce a dark "ghost stroke" along the edges of every character.
+  if(fillEnabled && strokePx <= 0){
+    ctx.save()
+    ctx.shadowColor = rgb(color)
+    ctx.shadowBlur = SS * 1.2
+    ctx.shadowOffsetX = 0
+    ctx.shadowOffsetY = 0
+    let xH = pad
+    for(const ch of chars){
+      ctx.fillText(ch, xH, h / 2)
+      xH += tmp.measureText(ch).width + ls
+    }
+    ctx.restore()
+  }
+  // Pass 2 — final crisp text on top.
   let x = pad
   for(const ch of chars){
     if(strokePx > 0) ctx.strokeText(ch, x, h / 2)
@@ -1491,9 +1516,9 @@ export default function App(){
           }
         }
         e.currentTarget.setPointerCapture?.(e.pointerId)
-        return
       }
-      setSelectedUid(null); return
+      // Keep the current selection on empty click (no deselect).
+      return
     }
     if(hit.type === 'vertex'){
       dragRef.current = { kind: 'vertex', uid: hit.shape.uid, vertexIdx: hit.vertexIdx }
@@ -1984,8 +2009,8 @@ export default function App(){
             </>
           )}
 
-          {/* Orientation gizmo — 3 colored axis arrows + numeric rotation badge */}
-          {axisGizmo && tool === 'select' && (
+          {/* Orientation gizmo — only in 3D mode */}
+          {axisGizmo && tool === 'select' && cameraMode === '3d' && (
             <>
               <svg className="axis-gizmo" width={wrapW} height={wrapH} viewBox={`0 0 ${wrapW} ${wrapH}`} preserveAspectRatio="none">
                 <defs>

@@ -2376,14 +2376,17 @@ float strokeMask(vec2 inCell, float w){
   return smoothstep(1.0 - w*2.0, 1.0 - w, frame) * (1.0 - step(1.0, frame));
 }
 
+// Corner-only L brackets — short legs at each cell corner like a real AF UI.
 float cornerBrackets(vec2 inCell, float w){
   vec2 d = abs(inCell - 0.5) * 2.0;
-  float legLen = 0.32;
-  bool inCorner = (d.x > 1.0 - legLen) && (d.y > 1.0 - legLen);
-  if(!inCorner) return 0.0;
-  float a = step(1.0 - w * 1.6, d.x);
-  float b = step(1.0 - w * 1.6, d.y);
-  return clamp(max(a, b), 0.0, 1.0) * (1.0 - step(1.0, max(d.x, d.y)));
+  float legLen = 0.18;             // short legs
+  if(d.x < 1.0 - legLen && d.y < 1.0 - legLen) return 0.0; // not near corner
+  if(d.x > 1.0 || d.y > 1.0) return 0.0;
+  float armW = max(w * 0.55, 0.005);
+  // horizontal leg near the corner
+  float h = step(1.0 - armW, d.y) * step(1.0 - legLen, d.x);
+  float v = step(1.0 - armW, d.x) * step(1.0 - legLen, d.y);
+  return clamp(max(h, v), 0.0, 1.0);
 }
 
 void main(){
@@ -2413,41 +2416,47 @@ void main(){
 
   // Pulsing stroke — each cell has its own phase so they breathe out of sync.
   float cellPhase = hash(cellId + 3.7) * 6.28;
-  float pulseEnv = u_pulse > 0.001 ? (0.7 + 0.3 * sin(u_time * 3.0 + cellPhase)) : 1.0;
+  float pulseEnv = u_pulse > 0.001 ? (0.78 + 0.22 * sin(u_time * 2.4 + cellPhase)) : 1.0;
   float strokeW = u_strokeW * mix(1.0, pulseEnv, u_pulse);
+  // Stroke alpha — boxes appear gracefully scaled by saliency so weak cells
+  // are subtle and strong cells are confident.
+  float strokeA = clamp(activate * 1.4, 0.0, 1.0);
 
   if(u_showStroke > 0.5){
-    res = mix(res, u_strokeColor, strokeMask(inCell, strokeW));
+    float m = strokeMask(inCell, strokeW) * strokeA;
+    res = mix(res, u_strokeColor, m);
   }
   if(u_showCorners > 0.5 && u_shape < 0.5){
-    res = mix(res, u_strokeColor, cornerBrackets(inCell, strokeW));
+    float m = cornerBrackets(inCell, strokeW * 1.4) * strokeA;
+    res = mix(res, u_strokeColor, m);
   }
-  // Cross-hair at cell center
+  // Cross-hair at cell center — fine + small
   if(u_showCrosshair > 0.5){
     vec2 dC = abs(inCell - 0.5);
-    float armLen = 0.18, armW = max(strokeW * 0.5, 0.005);
+    float armLen = 0.10, armW = max(strokeW * 0.35, 0.0035);
     float h1 = step(dC.y, armW) * step(dC.x, armLen);
     float v1 = step(dC.x, armW) * step(dC.y, armLen);
-    res = mix(res, u_strokeColor, max(h1, v1));
+    res = mix(res, u_strokeColor, max(h1, v1) * 0.9 * strokeA);
   }
-  // Confidence bar at the bottom of the cell — length tracks saliency.
+  // Confidence bar at the bottom of the cell — slim, length tracks saliency.
   if(u_showConfBar > 0.5 && u_shape < 0.5){
     float bx = inCell.x;
     float by = inCell.y;
-    float yMin = 1.0 - strokeW * 4.0;
-    float yMax = 1.0 - strokeW * 1.5;
-    float xMin = strokeW * 1.5;
-    float xMax = xMin + (1.0 - strokeW * 3.0) * clamp(activate, 0.0, 1.0);
+    float barH = max(strokeW * 0.9, 0.006);
+    float yMin = 1.0 - strokeW * 2.6;
+    float yMax = yMin + barH;
+    float xMin = strokeW * 1.8;
+    float xMax = xMin + (1.0 - strokeW * 3.6) * clamp(activate, 0.0, 1.0);
     if(by > yMin && by < yMax && bx > xMin && bx < xMax){
-      res = u_strokeColor;
+      res = mix(res, u_strokeColor, strokeA);
     }
   }
   // Scan line — a horizontal beam moving down each cell, phased per cell.
   if(u_showScan > 0.5){
     float sy = fract(u_time * 0.35 + hash(cellId + 5.3));
     float dist = abs(inCell.y - sy);
-    float scan = exp(-dist * 50.0);
-    res = mix(res, u_strokeColor, scan * 0.6 * inside);
+    float scan = exp(-dist * 80.0);
+    res = mix(res, u_strokeColor, scan * 0.45 * inside * strokeA);
   }
 
   o = vec4(mix(base, res, u_mix), 1.0);
@@ -2935,14 +2944,14 @@ export const EFFECTS = {
       { key:'u_animSpeed',   label:'anim speed',    type:'range',  min:0, max:6, step:0.01,  default:1.0 },
       { key:'u_pulse',       label:'pulse',         type:'range',  min:0, max:1, step:0.01,  default:0.6 },
       { key:'u_shape',       label:'box shape',     type:'select', options:[['rect',0],['circle',1],['diamond',2]], default:0 },
-      { key:'u_strokeW',     label:'stroke',        type:'range',  min:0, max:0.2, step:0.001, default:0.045 },
-      { key:'u_strokeColor', label:'stroke color',  type:'color',  default: c(0.05, 1, 0.6) },
+      { key:'u_strokeW',     label:'stroke',        type:'range',  min:0, max:0.1, step:0.0005, default:0.012 },
+      { key:'u_strokeColor', label:'stroke color',  type:'color',  default: c(1, 1, 1) },
       { key:'u_effectMix',   label:'inside mix',    type:'range',  min:0, max:1, step:0.01, default:1 },
-      { key:'u_showStroke',  label:'show stroke',   type:'toggle', default:true },
+      { key:'u_showStroke',  label:'full frame',    type:'toggle', default:false },
       { key:'u_showCorners', label:'corner AF',     type:'toggle', default:true },
-      { key:'u_showCrosshair', label:'crosshair',   type:'toggle', default:true },
+      { key:'u_showCrosshair', label:'crosshair',   type:'toggle', default:false },
       { key:'u_showConfBar',   label:'confidence bar', type:'toggle', default:true },
-      { key:'u_showScan',      label:'scan line',   type:'toggle', default:true },
+      { key:'u_showScan',      label:'scan line',   type:'toggle', default:false },
       // Pool of micro-effects — toggle which ones can appear in a tracked cell
       { key:'u_fx0', label:'· invert',     type:'toggle', default:true },
       { key:'u_fx1', label:'· aberration', type:'toggle', default:true },
