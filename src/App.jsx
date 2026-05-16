@@ -563,6 +563,7 @@ export default function App(){
     })
   }
   const [search, setSearch] = useState('')
+  const [libraryTab, setLibraryTab] = useState('effects') // 'assets' | 'shapes' | 'effects'
   const [tool, setTool] = useState('select')
   const [penColor, setPenColor] = useState([0.05, 0.05, 0.05])
   const [textDraft, setTextDraft] = useState(null)
@@ -1930,146 +1931,106 @@ export default function App(){
         </div>
       </div>
 
-      {/* LEFT */}
+      {/* LEFT — Library (tabbed: add content) */}
       <div className="left">
-        <div className="section-bar">
-          <span className="section-letter">S</span>
-          <span className="section-label">SAMPLES</span>
-          <span className="section-count">{SAMPLES.length}</span>
-        </div>
-        <div className="sample-grid">
-          {SAMPLES.map((s) => (
-            <button key={s.url} className="sample-tile" style={{ backgroundImage: `url(${s.url})` }} onClick={() => addImage(s.url, s.name)}>
-              <span className="sample-name">{s.name.split('·')[0].trim()}</span>
-            </button>
-          ))}
+        <div className="lib-tabs">
+          <button className={'lib-tab ' + (libraryTab === 'assets' ? 'on' : '')} onClick={() => setLibraryTab('assets')}>ASSETS</button>
+          <button className={'lib-tab ' + (libraryTab === 'shapes' ? 'on' : '')} onClick={() => setLibraryTab('shapes')}>SHAPES</button>
+          <button className={'lib-tab ' + (libraryTab === 'effects' ? 'on' : '')} onClick={() => setLibraryTab('effects')}>EFFECTS</button>
         </div>
 
-        <div className="section-bar">
-          <span className="section-letter">P</span>
-          <span className="section-label">PRIMITIVES</span>
-          <span className="section-count">{PRIMITIVES.length}</span>
-        </div>
-        <div className="primitive-grid">
-          {PRIMITIVES.map(p => (
-            <button key={p.id} className="primitive-btn" onClick={() => addPrimitive(p.id)} title={p.label}>
-              <svg className="primitive-svg" viewBox="0 0 24 24" width="36" height="36" aria-hidden>{PRIM_ICONS[p.id]}</svg>
-              <span className="primitive-name">{p.label}</span>
-            </button>
-          ))}
-        </div>
-
-        <div className="section-bar">
-          <span className="section-letter">F</span>
-          <span className="section-label">EFFECTS LIBRARY</span>
-          <span className="section-count">{Object.keys(EFFECTS).length}</span>
-        </div>
-        <div className="cat-bar">
-          <button className="cat-mini" onClick={expandAll}>EXPAND ALL</button>
-          <button className="cat-mini" onClick={collapseAll}>COLLAPSE ALL</button>
-        </div>
-        <div className="search">
-          <input placeholder="search effects..." value={search} onChange={(e) => setSearch(e.target.value)} />
-        </div>
-
-        {orderedGroups.map((grp) => (
-          <div className={'cat-group ' + (collapsedCats.has(grp) && !search ? 'collapsed' : 'open')} key={grp}>
-            <button className="cat-h" onClick={() => toggleCat(grp)}>
-              <span className="disclose">{collapsedCats.has(grp) && !search ? '▸' : '▾'}</span>
-              <span className="cat-badge">{grp.startsWith('★') ? '★' : grp[0]}</span>
-              <span className="cat-name">{grp}</span>
-              <span className="cat-count">{grouped[grp].length}</span>
-            </button>
-            {(!collapsedCats.has(grp) || search) && (
-              <div className="cat-list">
-                {grouped[grp].map((e) => {
-                  const fav = favorites.has(e.id)
-                  return (
-                    <div key={`${grp}-${e.id}`} className="cat-item"
-                      role="button"
-                      tabIndex={0}
-                      draggable="true"
-                      onDragStart={(ev) => onEffectDragStart(ev, e.id)}
-                      onDragEnd={onEffectDragEnd}
-                      onClick={() => addEffect(e.id)}
-                      onKeyDown={(ev) => { if(ev.key === 'Enter' || ev.key === ' ') addEffect(e.id) }}
-                      title="click to add · drag onto a layer to scope · ★ to favorite">
-                      <span className="cat-item-grip" aria-hidden>⋮⋮</span>
-                      <button className={'fav-star ' + (fav ? 'on' : '')}
-                        onClick={(ev) => { ev.stopPropagation(); toggleFavorite(e.id) }}
-                        title={fav ? 'remove from favorites' : 'add to favorites'}>{fav ? '★' : '☆'}</button>
-                      <span className="cat-item-label">{e.label}</span>
-                      <span className="add">+</span>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-        ))}
-
-        {/* === CAMERA (3D scene) === */}
-        {cameraMode === '3d' && (
+        {libraryTab === 'assets' && (
           <>
-            <div className="section-bar bg-bar">
-              <span className="section-letter">C</span>
-              <span className="section-label">CAMERA · 3D</span>
-              <span className="section-count">drag canvas to orbit</span>
+            <div className="section-bar">
+              <span className="section-letter">A</span>
+              <span className="section-label">SAMPLES</span>
+              <span className="section-count">{SAMPLES.length}</span>
             </div>
-            <div className="bg-panel">
-              <ParamControl param={{ key:'yaw', label:'yaw', type:'range', min:-Math.PI*2, max:Math.PI*2, step:0.001, default:0 }}
-                value={camera.yaw} onChange={(v) => setCamera(c => ({ ...c, yaw: v }))} />
-              <ParamControl param={{ key:'pitch', label:'pitch', type:'range', min:-1.4, max:1.4, step:0.001, default:0 }}
-                value={camera.pitch} onChange={(v) => setCamera(c => ({ ...c, pitch: v }))} />
-              <ParamControl param={{ key:'zoom', label:'zoom', type:'range', min:0.2, max:3, step:0.001, default:1 }}
-                value={camera.zoom} onChange={(v) => setCamera(c => ({ ...c, zoom: v }))} />
-              <div className="row-btns">
-                <button className="mini-btn" onClick={() => setCamera({ yaw: 0, pitch: 0, zoom: 1 })}>reset camera</button>
-              </div>
+            <div className="sample-grid">
+              {SAMPLES.map((s) => (
+                <button key={s.url} className="sample-tile" style={{ backgroundImage: `url(${s.url})` }} onClick={() => addImage(s.url, s.name)}>
+                  <span className="sample-name">{s.name.split('·')[0].trim()}</span>
+                </button>
+              ))}
             </div>
+            <label className="lib-upload-btn">
+              + UPLOAD IMAGE / VIDEO
+              <input type="file" accept="image/*,video/*" multiple className="upload-input" onChange={onUploadInput} />
+            </label>
+            <div className="hint">drop files anywhere · or click a sample</div>
           </>
         )}
 
-        {/* === BACKGROUND === */}
-        <div className="section-bar bg-bar">
-          <span className="section-letter">B</span>
-          <span className="section-label">BACKGROUND</span>
-          <span className="section-count">{bg.type}</span>
-        </div>
-        <div className="bg-panel">
-          <div className="bg-type-row">
-            {BG_TYPES.map(([id, label]) => (
-              <button key={id}
-                className={'bg-type-btn ' + (bg.type === id ? 'on' : '')}
-                onClick={() => setBgType(id)}>{label}</button>
-            ))}
-          </div>
-          {bg.type === 'solid' && (
-            <ParamControl param={{ key:'color', label:'color', type:'color', default:[0,0,0] }}
-              value={bg.color} onChange={(v) => setBgField('color', v)} />
-          )}
-          {bg.type === 'transparent' && (
-            <div className="bg-transparent-note">no fill — exports as PNG with alpha</div>
-          )}
-          {(bg.type === 'linear' || bg.type === 'radial' || bg.type === 'conic') && (
-            <>
-              <ParamControl param={{ key:'colorA', label:'color A', type:'color', default:[0,0,0] }}
-                value={bg.colorA} onChange={(v) => setBgField('colorA', v)} />
-              <ParamControl param={{ key:'colorB', label:'color B', type:'color', default:[1,1,1] }}
-                value={bg.colorB} onChange={(v) => setBgField('colorB', v)} />
-              {(bg.type === 'linear' || bg.type === 'conic') && (
-                <ParamControl param={{ key:'angle', label:'angle', type:'range', min:0, max:360, step:1, default:90 }}
-                  value={bg.angle} onChange={(v) => setBgField('angle', v)} />
-              )}
-              {bg.type === 'radial' && (
-                <ParamControl param={{ key:'radius', label:'radius', type:'range', min:0.1, max:1.5, step:0.001, default:0.7 }}
-                  value={bg.radius} onChange={(v) => setBgField('radius', v)} />
-              )}
-            </>
-          )}
-        </div>
+        {libraryTab === 'shapes' && (
+          <>
+            <div className="section-bar">
+              <span className="section-letter">S</span>
+              <span className="section-label">PRIMITIVES</span>
+              <span className="section-count">{PRIMITIVES.length}</span>
+            </div>
+            <div className="primitive-grid">
+              {PRIMITIVES.map(p => (
+                <button key={p.id} className="primitive-btn" onClick={() => addPrimitive(p.id)} title={p.label}>
+                  <svg className="primitive-svg" viewBox="0 0 24 24" width="36" height="36" aria-hidden>{PRIM_ICONS[p.id]}</svg>
+                  <span className="primitive-name">{p.label}</span>
+                </button>
+              ))}
+            </div>
+            <div className="hint">p = pen tool · t = text tool</div>
+          </>
+        )}
 
-        <div className="hint">v select · p pen · t text · drop images</div>
+        {libraryTab === 'effects' && (
+          <>
+            <div className="section-bar">
+              <span className="section-letter">F</span>
+              <span className="section-label">EFFECTS</span>
+              <span className="section-count">{Object.keys(EFFECTS).length}</span>
+            </div>
+            <div className="search">
+              <input placeholder="search effects..." value={search} onChange={(e) => setSearch(e.target.value)} />
+            </div>
+            <div className="cat-bar">
+              <button className="cat-mini" onClick={expandAll}>EXPAND ALL</button>
+              <button className="cat-mini" onClick={collapseAll}>COLLAPSE ALL</button>
+            </div>
+            {orderedGroups.map((grp) => (
+              <div className={'cat-group ' + (collapsedCats.has(grp) && !search ? 'collapsed' : 'open')} key={grp}>
+                <button className="cat-h" onClick={() => toggleCat(grp)}>
+                  <span className="disclose">{collapsedCats.has(grp) && !search ? '▸' : '▾'}</span>
+                  <span className="cat-badge">{grp.startsWith('★') ? '★' : grp[0]}</span>
+                  <span className="cat-name">{grp}</span>
+                  <span className="cat-count">{grouped[grp].length}</span>
+                </button>
+                {(!collapsedCats.has(grp) || search) && (
+                  <div className="cat-list">
+                    {grouped[grp].map((e) => {
+                      const fav = favorites.has(e.id)
+                      return (
+                        <div key={`${grp}-${e.id}`} className="cat-item"
+                          role="button"
+                          tabIndex={0}
+                          draggable="true"
+                          onDragStart={(ev) => onEffectDragStart(ev, e.id)}
+                          onDragEnd={onEffectDragEnd}
+                          onClick={() => addEffect(e.id)}
+                          onKeyDown={(ev) => { if(ev.key === 'Enter' || ev.key === ' ') addEffect(e.id) }}
+                          title="click to add · drag onto a layer to scope · ★ to favorite">
+                          <span className="cat-item-grip" aria-hidden>⋮⋮</span>
+                          <button className={'fav-star ' + (fav ? 'on' : '')}
+                            onClick={(ev) => { ev.stopPropagation(); toggleFavorite(e.id) }}
+                            title={fav ? 'remove from favorites' : 'add to favorites'}>{fav ? '★' : '☆'}</button>
+                          <span className="cat-item-label">{e.label}</span>
+                          <span className="add">+</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            ))}
+          </>
+        )}
       </div>
 
       {/* CENTER */}
@@ -2569,6 +2530,78 @@ export default function App(){
                   )}
                 </>
               )}
+            </div>
+          </div>
+        )}
+
+        {/* SCENE — shown when nothing is selected: background + camera + canvas */}
+        {!sel && (
+          <div className="scene-panel">
+            <div className="sub-bar editing">
+              <span>SCENE</span>
+              <span className="sub-tag">CANVAS</span>
+            </div>
+            <div className="params">
+              <div className="m3d-section-h">BACKGROUND</div>
+              <div className="bg-type-row">
+                {BG_TYPES.map(([id, label]) => (
+                  <button key={id}
+                    className={'bg-type-btn ' + (bg.type === id ? 'on' : '')}
+                    onClick={() => setBgType(id)}>{label}</button>
+                ))}
+              </div>
+              {bg.type === 'solid' && (
+                <ParamControl param={{ key:'color', label:'color', type:'color', default:[0,0,0] }}
+                  value={bg.color} onChange={(v) => setBgField('color', v)} />
+              )}
+              {bg.type === 'transparent' && (
+                <div className="bg-transparent-note">no fill — exports as PNG with alpha</div>
+              )}
+              {(bg.type === 'linear' || bg.type === 'radial' || bg.type === 'conic') && (
+                <>
+                  <ParamControl param={{ key:'colorA', label:'color A', type:'color', default:[0,0,0] }}
+                    value={bg.colorA} onChange={(v) => setBgField('colorA', v)} />
+                  <ParamControl param={{ key:'colorB', label:'color B', type:'color', default:[1,1,1] }}
+                    value={bg.colorB} onChange={(v) => setBgField('colorB', v)} />
+                  {(bg.type === 'linear' || bg.type === 'conic') && (
+                    <ParamControl param={{ key:'angle', label:'angle', type:'range', min:0, max:360, step:1, default:90 }}
+                      value={bg.angle} onChange={(v) => setBgField('angle', v)} />
+                  )}
+                  {bg.type === 'radial' && (
+                    <ParamControl param={{ key:'radius', label:'radius', type:'range', min:0.1, max:1.5, step:0.001, default:0.7 }}
+                      value={bg.radius} onChange={(v) => setBgField('radius', v)} />
+                  )}
+                </>
+              )}
+
+              <div className="m3d-section-h">CAMERA</div>
+              <div className="bg-type-row" style={{ gridTemplateColumns: '1fr 1fr' }}>
+                <button className={'bg-type-btn ' + (cameraMode === '2d' ? 'on' : '')} onClick={() => setCameraMode('2d')}>2D</button>
+                <button className={'bg-type-btn ' + (cameraMode === '3d' ? 'on' : '')}
+                  onClick={() => { setCameraMode('3d'); if(camera.yaw === 0 && camera.pitch === 0) setCamera({ yaw: 0.35, pitch: 0.45, zoom: 0.92, panX: 0, panY: 0 }) }}>3D</button>
+              </div>
+              {cameraMode === '3d' && (
+                <>
+                  <ParamControl param={{ key:'yaw', label:'yaw', type:'range', min:-Math.PI*2, max:Math.PI*2, step:0.001, default:0 }}
+                    value={camera.yaw} onChange={(v) => setCamera(c => ({ ...c, yaw: v }))} />
+                  <ParamControl param={{ key:'pitch', label:'pitch', type:'range', min:-1.4, max:1.4, step:0.001, default:0 }}
+                    value={camera.pitch} onChange={(v) => setCamera(c => ({ ...c, pitch: v }))} />
+                  <ParamControl param={{ key:'zoom', label:'zoom', type:'range', min:0.2, max:3, step:0.001, default:1 }}
+                    value={camera.zoom} onChange={(v) => setCamera(c => ({ ...c, zoom: v }))} />
+                  <div className="row-btns">
+                    <button className="mini-btn" onClick={() => setCamera({ yaw: 0.35, pitch: 0.45, zoom: 0.92, panX: 0, panY: 0 })}>reset camera</button>
+                  </div>
+                  <div className="param-hint">drag empty canvas to orbit · shift+drag to pan · wheel to zoom</div>
+                </>
+              )}
+
+              <div className="m3d-section-h">ASPECT</div>
+              <div className="bg-type-row" style={{ gridTemplateColumns: 'repeat(5, 1fr)' }}>
+                {ASPECTS.map((x) => (
+                  <button key={x.id} className={'bg-type-btn ' + (x.id === aspect ? 'on' : '')} onClick={() => setAspect(x.id)}>{x.id}</button>
+                ))}
+              </div>
+              <div className="param-hint" style={{ marginTop: 10 }}>select a layer to edit it · nothing selected shows scene settings</div>
             </div>
           </div>
         )}
